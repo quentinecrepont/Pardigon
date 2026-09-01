@@ -1,0 +1,75 @@
+import type { GrainPresetName, GrainSettings } from "./types";
+
+const definePreset = (settings: GrainSettings): Readonly<GrainSettings> =>
+  Object.freeze(settings);
+
+export const grainPresets = Object.freeze({
+  "8mm": definePreset({
+    intensity: 0.04,
+    color: "#ffffff",
+    size: 2.7,
+    animated: true,
+    blur: 1,
+    complexity: 0,
+    speed: 0.8,
+    fps: 12,
+    animationMode: "evolve",
+  }),
+  "16mm": definePreset({
+    intensity: 0.03,
+    color: "#ffffff",
+    size: 2.2,
+    animated: true,
+    blur: 1,
+    complexity: 0,
+    speed: 0.95,
+    fps: 14,
+    animationMode: "evolve",
+  }),
+  "35mm": definePreset({
+    intensity: 0.02,
+    color: "#ffffff",
+    size: 2,
+    animated: true,
+    blur: 0.65,
+    complexity: 0.35,
+    speed: 1,
+    fps: 24,
+    animationMode: "evolve",
+  }),
+  paper: definePreset({
+    intensity: 0.04,
+    color: "#ffffff",
+    size: 2,
+    animated: false,
+    blur: 0.92,
+    complexity: 0.57,
+    speed: 0.1,
+    fps: 1,
+    animationMode: "evolve",
+  }),
+  pixel: definePreset({
+    intensity: 0.04,
+    color: "#ffffff",
+    size: 4.2,
+    animated: false,
+    blur: 0,
+    complexity: 0,
+    speed: 0.1,
+    fps: 1,
+    animationMode: "evolve",
+  }),
+  fog: definePreset({
+    intensity: 0.1,
+    color: "#ffffff",
+    size: 128,
+    animated: true,
+    blur: 1,
+    complexity: 0.42,
+    speed: 1.2,
+    fps: 60,
+    animationMode: "flow",
+  }),
+}) satisfies Readonly<
+  Record<GrainPresetName, Readonly<GrainSettings>>
+>;
