@@ -6,6 +6,7 @@ export type {
   GrainMetrics,
   GrainOptions,
   GrainPresetName,
+  GrainQualityMode,
   GrainSettings,
   GrainUpdateOptions,
 } from "./types";

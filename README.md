@@ -1,6 +1,6 @@
 # Pardigon
 
-#### Current version: v0.2.0
+#### Current version: v0.3.0
 
 Procedural cinematic grain for the web.
 
@@ -35,6 +35,7 @@ Cross built the landscape from separate touches of colour that come together in 
 - Adjustable grain character and clustering
 - Independent animation speed and frame rate
 - Live updates without restarting the renderer
+- Automatic quality based on frame stability
 - Mobile-aware resolution and frame-rate limits
 - Automatic pause when the page or target is hidden
 - Reduced-motion support
@@ -67,6 +68,7 @@ import { createGrain } from "pardigon";
 const grain = createGrain({
   target: document.body,
   preset: "8mm",
+  quality: "auto",
   respectReducedMotion: true,
 });
 ```
@@ -125,6 +127,7 @@ Update it, pause it, restart it, or remove it:
 grain.update({ intensity: 0.08, size: 4, complexity: 0.6, character: 0.7 });
 grain.update({ color: "#4b8dff" });
 grain.update({ preset: "fog", intensity: 0.05 });
+grain.update({ quality: "auto" });
 grain.update({ respectReducedMotion: false });
 const metrics = grain.getMetrics();
 grain.pause();
@@ -137,7 +140,15 @@ grain.destroy();
 `getMetrics()` returns the latest measured shader draw time when the browser supports `EXT_disjoint_timer_query_webgl2`:
 
 ```ts
-const { gpuTimeMs, gpuTimerSupported } = grain.getMetrics();
+const {
+  gpuTimeMs,
+  gpuTimerSupported,
+  quality,
+  qualityLevel,
+  renderScale,
+  effectiveFps,
+  effectiveComplexity,
+} = grain.getMetrics();
 ```
 
 This measures Pardigon's draw call, not the device's total GPU usage. The [live demo](https://pardigon.vercel.app) also shows page FPS and frame stability with `requestAnimationFrame`, including on browsers that do not expose the GPU timer.
@@ -149,6 +160,7 @@ This measures Pardigon's draw call, not the device's total GPU usage. The [live 
 | `target` | Element that receives the canvas overlay | `document.body` |
 | `preset` | Built-in visual starting point | none |
 | `respectReducedMotion` | Freezes animation when reduced motion is requested | `true` |
+| `quality` | Uses `fixed` quality or adapts cost with `auto` | `fixed` |
 | `intensity` | Grain strength, from `0` to `1` | `0.06` |
 | `color` | Grain tint as `#RGB` or `#RRGGBB` | `#ffffff` |
 | `size` | Grain scale in CSS pixels | `1` |
@@ -199,6 +211,12 @@ If the browser loses its WebGL context, Pardigon stops rendering and rebuilds th
 
 Render resolution is limited on high-density screens: up to `1x` device pixel ratio on viewports of `768px` or less, and `1.5x` on wider viewports. The real cost still depends on screen size, device, grain complexity and the number of active surfaces.
 
+With `quality: "auto"`, Pardigon measures frame stability in the animation loop. It lowers quality after two poor one-second samples and waits for five stable samples before moving back up. This slower recovery prevents rapid changes between levels.
+
+The four levels reduce internal resolution first, disable the detail layer second and reduce rendering FPS last. At the lowest level, Pardigon uses `55%` of its base render resolution, no additional detail layer and `75%` of the selected frame rate. Intensity, colour, grain size, character and motion stay unchanged. The original settings are never overwritten.
+
+Use `getMetrics()` to read the active quality level and effective values. Set `quality: "fixed"` to keep the original rendering behaviour.
+
 Performance varies between devices, so test Pardigon on the hardware that matters to your project.
 
 ## Roadmap
@@ -208,7 +226,7 @@ Pardigon will stay focused on procedural grain, texture and atmosphere. These ar
 ### Overview
 
 - [ ] Better performance measurements
-- [ ] Automatic quality
+- [x] Automatic quality
 - [ ] Masks and local regions
 - [ ] More temporal control
 - [x] Grain character
@@ -230,9 +248,9 @@ These measurements will help compare presets and future changes. They will also 
 
 ### 2. Automatic quality
 
-A future `quality: "auto"` option could adjust the internal resolution, shader complexity and rendering rate when a device starts losing frames.
+The `quality: "auto"` option adjusts internal resolution, the optional detail layer and rendering rate when frame stability drops.
 
-Adjustments should be gradual and should preserve the selected intensity, colour and motion. The visual direction must remain stable while Pardigon reduces its rendering cost.
+Adjustments are gradual. Intensity, colour, size, character and motion keep their selected values while Pardigon reduces its rendering cost. `quality: "fixed"` keeps the full-quality level at all times.
 
 ### 3. Masks and local regions
 

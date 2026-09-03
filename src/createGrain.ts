@@ -4,6 +4,7 @@ import type {
   GrainMetrics,
   GrainOptions,
   GrainPresetName,
+  GrainQualityMode,
   GrainSettings,
 } from "./types";
 
@@ -13,6 +14,7 @@ export type {
   GrainMetrics,
   GrainOptions,
   GrainPresetName,
+  GrainQualityMode,
   GrainSettings,
   GrainUpdateOptions,
 } from "./types";
@@ -29,6 +31,18 @@ const DEFAULT_SETTINGS: Readonly<GrainSettings> = Object.freeze({
   fps: 24,
   animationMode: "evolve",
 });
+
+const AUTO_QUALITY_LEVELS = [
+  { renderScale: 1, complexityScale: 1, fpsScale: 1 },
+  { renderScale: 0.85, complexityScale: 1, fpsScale: 1 },
+  { renderScale: 0.7, complexityScale: 0, fpsScale: 1 },
+  { renderScale: 0.55, complexityScale: 0, fpsScale: 0.75 },
+] as const;
+
+const AUTO_QUALITY_SAMPLE_DURATION_MS = 1_000;
+const AUTO_QUALITY_SLOW_FRAME_MS = 24;
+const AUTO_QUALITY_POOR_SAMPLE_COUNT = 2;
+const AUTO_QUALITY_STABLE_SAMPLE_COUNT = 5;
 
 const VERTEX_SHADER = `#version 300 es
 void main() {
@@ -168,6 +182,15 @@ void main() {
 
 const clamp = (value: number, min: number, max: number): number =>
   Math.min(Math.max(value, min), max);
+
+function percentile(values: readonly number[], ratio: number): number {
+  const sortedValues = [...values].sort((a, b) => a - b);
+  const index = Math.min(
+    sortedValues.length - 1,
+    Math.floor(sortedValues.length * ratio),
+  );
+  return sortedValues[index] ?? 0;
+}
 
 function normalizeHexColor(value: string): string {
   const match = /^#([\da-f]{3}|[\da-f]{6})$/i.exec(value.trim());
@@ -452,6 +475,12 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
   let destroyed = false;
   let targetVisible = true;
   let respectReducedMotion = options.respectReducedMotion ?? true;
+  let qualityMode: GrainQualityMode = options.quality === "auto" ? "auto" : "fixed";
+  let qualityLevel = 0;
+  let qualitySampleStartedAt: number | null = null;
+  let qualityFrameIntervals: number[] = [];
+  let poorQualitySampleCount = 0;
+  let stableQualitySampleCount = 0;
   let resizeObserver: ResizeObserver | null = null;
   let intersectionObserver: IntersectionObserver | null = null;
   const reducedMotionQuery = typeof window.matchMedia === "function"
@@ -462,6 +491,77 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     target.style.position = "relative";
   }
   target.appendChild(canvas);
+
+  const getQualityLevel = () =>
+    AUTO_QUALITY_LEVELS[qualityLevel] ?? AUTO_QUALITY_LEVELS[0];
+
+  const getDeviceFpsLimit = (): number => window.innerWidth <= 768 ? 24 : 60;
+
+  const getEffectiveFps = (): number => {
+    const requestedFps = Math.min(settings.fps, getDeviceFpsLimit());
+    return Math.max(1, requestedFps * getQualityLevel().fpsScale);
+  };
+
+  const getEffectiveComplexity = (): number =>
+    settings.complexity * getQualityLevel().complexityScale;
+
+  const resetQualitySamples = (): void => {
+    qualitySampleStartedAt = null;
+    qualityFrameIntervals = [];
+    poorQualitySampleCount = 0;
+    stableQualitySampleCount = 0;
+  };
+
+  const sampleAdaptiveQuality = (
+    timestamp: number,
+    frameInterval: number,
+  ): boolean => {
+    if (qualityMode !== "auto" || frameInterval <= 0 || frameInterval >= 250) {
+      return false;
+    }
+
+    qualitySampleStartedAt ??= timestamp;
+    qualityFrameIntervals.push(frameInterval);
+
+    if (timestamp - qualitySampleStartedAt < AUTO_QUALITY_SAMPLE_DURATION_MS) {
+      return false;
+    }
+
+    const frameTimeP95 = percentile(qualityFrameIntervals, 0.95);
+    const slowFrames = qualityFrameIntervals.filter(
+      (interval) => interval > AUTO_QUALITY_SLOW_FRAME_MS,
+    ).length;
+    const slowFrameRatio = slowFrames / qualityFrameIntervals.length;
+    const isPoor = frameTimeP95 > 28 || slowFrameRatio > 0.18;
+    const isStable = frameTimeP95 < 20 && slowFrameRatio < 0.05;
+
+    poorQualitySampleCount = isPoor ? poorQualitySampleCount + 1 : 0;
+    stableQualitySampleCount = isStable ? stableQualitySampleCount + 1 : 0;
+    qualitySampleStartedAt = timestamp;
+    qualityFrameIntervals = [];
+
+    if (
+      poorQualitySampleCount >= AUTO_QUALITY_POOR_SAMPLE_COUNT
+      && qualityLevel < AUTO_QUALITY_LEVELS.length - 1
+    ) {
+      qualityLevel += 1;
+      poorQualitySampleCount = 0;
+      stableQualitySampleCount = 0;
+      return true;
+    }
+
+    if (
+      stableQualitySampleCount >= AUTO_QUALITY_STABLE_SAMPLE_COUNT
+      && qualityLevel > 0
+    ) {
+      qualityLevel -= 1;
+      poorQualitySampleCount = 0;
+      stableQualitySampleCount = 0;
+      return true;
+    }
+
+    return false;
+  };
 
   const pollGpuTimer = (): void => {
     const extension = gpuTimerExtension;
@@ -527,10 +627,10 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     gl.uniform1f(uniforms.pixelRatio, pixelRatio);
     gl.uniform1f(uniforms.time, elapsedTime);
     gl.uniform1f(uniforms.blur, settings.blur);
-    gl.uniform1f(uniforms.complexity, settings.complexity);
+    gl.uniform1f(uniforms.complexity, getEffectiveComplexity());
     gl.uniform1f(uniforms.character, settings.character);
     gl.uniform1f(uniforms.speed, settings.speed);
-    gl.uniform1f(uniforms.fps, settings.fps);
+    gl.uniform1f(uniforms.fps, getEffectiveFps());
     gl.uniform1f(uniforms.animationMode, settings.animationMode === "flow" ? 1 : 0);
     const gpuQuery = startGpuTimer();
     try {
@@ -551,14 +651,18 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
       return;
     }
 
+    const frameInterval = previousTimestamp === null ? 0 : timestamp - previousTimestamp;
     if (previousTimestamp !== null) {
-      elapsedTime += Math.min(timestamp - previousTimestamp, 100) / 1000;
+      elapsedTime += Math.min(frameInterval, 100) / 1000;
     }
     previousTimestamp = timestamp;
+    const qualityChanged = sampleAdaptiveQuality(timestamp, frameInterval);
     // La cadence reste fluide ; speed ne ralentit que le mouvement du champ.
-    const deviceFpsLimit = window.innerWidth <= 768 ? 24 : 60;
-    const targetFps = Math.min(settings.fps, deviceFpsLimit);
-    if (timestamp - lastRenderTimestamp >= 1000 / targetFps) {
+    const targetFps = getEffectiveFps();
+    if (qualityChanged) {
+      resize();
+      lastRenderTimestamp = timestamp;
+    } else if (timestamp - lastRenderTimestamp >= 1000 / targetFps) {
       render();
       lastRenderTimestamp = timestamp;
     }
@@ -574,6 +678,7 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
       && !gl.isContextLost()
       && animationFrameId === null
     ) {
+      resetQualitySamples();
       animationFrameId = requestAnimationFrame(loop);
     }
   };
@@ -584,13 +689,16 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
       animationFrameId = null;
     }
     previousTimestamp = null;
+    qualitySampleStartedAt = null;
+    qualityFrameIntervals = [];
   };
 
   const resize = (): void => {
     // Le grain n'a pas besoin de la pleine résolution Retina d'une interface.
     // Sur téléphone, 1 pixel de rendu par pixel CSS réduit fortement la charge GPU.
     const pixelRatioLimit = window.innerWidth <= 768 ? 1 : 1.5;
-    pixelRatio = Math.min(window.devicePixelRatio || 1, pixelRatioLimit);
+    const basePixelRatio = Math.min(window.devicePixelRatio || 1, pixelRatioLimit);
+    pixelRatio = basePixelRatio * getQualityLevel().renderScale;
     const width = isFullscreenTarget ? window.innerWidth : target.clientWidth;
     const height = isFullscreenTarget ? window.innerHeight : target.clientHeight;
     canvas.width = Math.max(1, Math.round(width * pixelRatio));
@@ -709,9 +817,18 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
         respectReducedMotion = resolvedOptions.respectReducedMotion;
       }
 
+      let qualityChanged = false;
+      if (resolvedOptions.quality !== undefined) {
+        qualityMode = resolvedOptions.quality === "auto" ? "auto" : "fixed";
+        qualityChanged = qualityLevel !== 0;
+        qualityLevel = 0;
+        resetQualitySamples();
+      }
+
       if (shouldAnimate()) startLoop();
       else stopLoop();
-      render();
+      if (qualityChanged) resize();
+      else render();
     },
 
     getMetrics(): GrainMetrics {
@@ -719,6 +836,11 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
       return {
         gpuTimeMs,
         gpuTimerSupported: gpuTimerExtension !== null,
+        quality: qualityMode,
+        qualityLevel,
+        renderScale: getQualityLevel().renderScale,
+        effectiveFps: getEffectiveFps(),
+        effectiveComplexity: getEffectiveComplexity(),
       };
     },
 

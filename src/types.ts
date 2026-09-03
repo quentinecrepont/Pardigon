@@ -1,4 +1,5 @@
 export type GrainAnimationMode = "evolve" | "flow";
+export type GrainQualityMode = "fixed" | "auto";
 
 export type GrainPresetName =
   | "8mm"
@@ -38,6 +39,8 @@ export interface GrainOptions extends Partial<GrainSettings> {
   preset?: GrainPresetName;
   /** Freezes animation when the user requests reduced motion. Defaults to true. */
   respectReducedMotion?: boolean;
+  /** Keeps full quality or adapts rendering cost to frame stability. */
+  quality?: GrainQualityMode;
 }
 
 export interface GrainUpdateOptions extends Partial<GrainSettings> {
@@ -45,6 +48,8 @@ export interface GrainUpdateOptions extends Partial<GrainSettings> {
   preset?: GrainPresetName;
   /** Enables or disables reduced-motion handling. */
   respectReducedMotion?: boolean;
+  /** Keeps full quality or adapts rendering cost to frame stability. */
+  quality?: GrainQualityMode;
 }
 
 export interface GrainMetrics {
@@ -52,6 +57,16 @@ export interface GrainMetrics {
   gpuTimeMs: number | null;
   /** Whether the browser exposes a WebGL2 GPU timer. */
   gpuTimerSupported: boolean;
+  /** Current quality mode. */
+  quality: GrainQualityMode;
+  /** Adaptive level from 0 (full) to 3 (minimum). */
+  qualityLevel: number;
+  /** Current internal resolution multiplier. */
+  renderScale: number;
+  /** Current grain frame-rate limit after adaptation. */
+  effectiveFps: number;
+  /** Current shader complexity after adaptation. */
+  effectiveComplexity: number;
 }
 
 export interface GrainInstance {
