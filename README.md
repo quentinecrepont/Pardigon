@@ -198,6 +198,70 @@ Render resolution is limited on high-density screens: up to `1x` device pixel ra
 
 Performance varies between devices, so test Pardigon on the hardware that matters to your project.
 
+## Roadmap
+
+Pardigon will stay focused on procedural grain, texture and atmosphere. These are the current areas of development.
+
+### 1. Better performance measurements
+
+The first step is to record the current cost on desktop and mobile devices. The metrics API may grow to include:
+
+- Effective rendering FPS
+- Dropped frames
+- Number of rendered frames
+- Internal render scale
+- GPU draw time when the browser makes it available
+
+These measurements will help compare presets and future changes. They will also provide useful information on iOS, where GPU timing is often unavailable.
+
+### 2. Automatic quality
+
+A future `quality: "auto"` option could adjust the internal resolution, shader complexity and rendering rate when a device starts losing frames.
+
+Adjustments should be gradual and should preserve the selected intensity, colour and motion. The visual direction must remain stable while Pardigon reduces its rendering cost.
+
+### 3. Masks and local regions
+
+Grain could be placed inside a specific part of an element instead of covering the complete surface. Planned mask types include:
+
+- Radial areas
+- Horizontal or vertical gradients
+- Pointer-controlled areas
+- Image masks
+
+Small interactive regions should use a small moving canvas where possible. A 200 × 200 pixel reveal should only render that area instead of processing the complete element.
+
+### 4. More temporal control
+
+The animation system could offer three clear temporal styles:
+
+- `cut` for a new state on each grain frame
+- `morph` for continuous transformation
+- `flow` for spatial movement and evolution
+
+A `persistence` control could define how long a shape remains visible. Low persistence would suit fast film grain. High persistence would create more natural fog and slow atmospheric layers.
+
+### 5. Grain character
+
+A grain character control could change how the texture is formed without adding a long list of technical settings. It may control:
+
+- Uniform or clustered grain
+- Fine and coarse grain distribution
+- Size variation
+- Soft or strong contrast
+
+The shader must remain small enough for fullscreen use on mobile devices.
+
+### Later explorations
+
+- Luminance-dependent grain for images and videos
+- Optional chromatic grain
+- More procedural noise functions
+- Deeper film-stock-inspired behaviour
+- A WebGPU renderer while keeping WebGL2 as the main implementation
+
+Luminance-dependent grain requires access to the source image or video. A WebGL canvas cannot directly read the HTML content behind it, so this feature will need a separate rendering path and careful mobile testing.
+
 ## Local development
 
 Development requires Node.js 20.19 or newer, or Node.js 22.12 or newer.
