@@ -13,6 +13,7 @@ const options: GrainOptions = {
   preset,
   intensity: grainPresets[preset].intensity,
   color: "#7ac7ff",
+  character: 0.65,
   respectReducedMotion: true,
 };
 
@@ -20,6 +21,7 @@ if (isWebGL2Supported()) {
   const grain: GrainInstance = createGrain(options);
   grain.update({ preset: "fog", intensity: 0.05 });
   grain.update({ color: "#1683ff" });
+  grain.update({ character: 0.4 });
   grain.update({ respectReducedMotion: false });
   const metrics = grain.getMetrics();
   metrics.gpuTimeMs;

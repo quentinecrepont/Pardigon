@@ -1,6 +1,6 @@
 # Pardigon
 
-#### Current version: v0.1.0
+#### Current version: v0.2.0
 
 Procedural cinematic grain for the web.
 
@@ -32,6 +32,7 @@ Cross built the landscape from separate touches of colour that come together in 
 - Custom grain colour
 - Fullscreen or local element overlays
 - Film-like evolution and flowing noise
+- Adjustable grain character and clustering
 - Independent animation speed and frame rate
 - Live updates without restarting the renderer
 - Mobile-aware resolution and frame-rate limits
@@ -101,6 +102,7 @@ createGrain({
   size: 128,
   blur: 1,
   complexity: 0.42,
+  character: 0.7,
   animated: true,
   speed: 1.2,
   fps: 60,
@@ -120,7 +122,7 @@ createGrain({
 Update it, pause it, restart it, or remove it:
 
 ```ts
-grain.update({ intensity: 0.08, size: 4, complexity: 0.6 });
+grain.update({ intensity: 0.08, size: 4, complexity: 0.6, character: 0.7 });
 grain.update({ color: "#4b8dff" });
 grain.update({ preset: "fog", intensity: 0.05 });
 grain.update({ respectReducedMotion: false });
@@ -152,6 +154,7 @@ This measures Pardigon's draw call, not the device's total GPU usage. The [live 
 | `size` | Grain scale in CSS pixels | `1` |
 | `blur` | Softens and connects the noise, from `0` to `1` | `0` |
 | `complexity` | Adds medium and fine detail, from `0` to `1` | `0.35` |
+| `character` | Changes the grain from evenly distributed to clustered, from `0` to `1` | `0` |
 | `animated` | Animates or freezes the grain | `true` |
 | `speed` | Animation speed multiplier | `1` |
 | `fps` | Temporal frame rate, from `1` to `60` | `24` |
@@ -202,6 +205,17 @@ Performance varies between devices, so test Pardigon on the hardware that matter
 
 Pardigon will stay focused on procedural grain, texture and atmosphere. These are the current areas of development.
 
+### Overview
+
+- [ ] Better performance measurements
+- [ ] Automatic quality
+- [ ] Masks and local regions
+- [ ] More temporal control
+- [x] Grain character
+- [ ] Later explorations
+
+A section will be checked when its work is complete and available in the public API.
+
 ### 1. Better performance measurements
 
 The first step is to record the current cost on desktop and mobile devices. The metrics API may grow to include:
@@ -243,14 +257,22 @@ A `persistence` control could define how long a shape remains visible. Low persi
 
 ### 5. Grain character
 
-A grain character control could change how the texture is formed without adding a long list of technical settings. It may control:
+The `character` option changes how grain is distributed across the surface:
 
-- Uniform or clustered grain
-- Fine and coarse grain distribution
-- Size variation
-- Soft or strong contrast
+- `0` keeps the grain even and preserves the original rendering
+- `0.5` creates moderate local variation
+- `1` creates stronger clusters and calmer areas
 
-The shader must remain small enough for fullscreen use on mobile devices.
+The control changes local grain density without changing its selected size, colour, movement or overall intensity. It runs inside the existing shader and does not use textures or another render pass.
+
+Current preset values:
+
+- `8mm`: `1`
+- `16mm`: `0.4`
+- `35mm`: `0`
+- `paper`: `0.12`
+- `pixel`: `0`
+- `fog`: `0.63`
 
 ### Later explorations
 

@@ -21,6 +21,8 @@ export interface GrainSettings {
   blur: number;
   /** Adds detail frequencies, between 0 and 1. */
   complexity: number;
+  /** Controls the spatial clustering of the grain, between 0 and 1. */
+  character: number;
   /** Multiplies the animation speed. */
   speed: number;
   /** Temporal frame rate used by the grain. */

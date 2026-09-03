@@ -24,6 +24,12 @@ test("keeps built-in presets immutable", () => {
   assert.equal(Object.isFrozen(grainPresets["8mm"]), true);
   assert.equal(Object.isFrozen(grainPresets.fog), true);
   assert.equal(grainPresets.fog.color, "#ffffff");
+  assert.equal(grainPresets["8mm"].character, 1);
+  assert.equal(grainPresets["16mm"].character, 0.4);
+  assert.equal(grainPresets["35mm"].character, 0);
+  assert.equal(grainPresets.paper.character, 0.12);
+  assert.equal(grainPresets.pixel.character, 0);
+  assert.equal(grainPresets.fog.character, 0.63);
 });
 
 test("fails safely outside a browser", () => {

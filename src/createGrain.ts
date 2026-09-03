@@ -24,6 +24,7 @@ const DEFAULT_SETTINGS: Readonly<GrainSettings> = Object.freeze({
   animated: true,
   blur: 0,
   complexity: 0.35,
+  character: 0,
   speed: 1,
   fps: 24,
   animationMode: "evolve",
@@ -50,6 +51,7 @@ uniform float u_pixelRatio;
 uniform float u_time;
 uniform float u_blur;
 uniform float u_complexity;
+uniform float u_character;
 uniform float u_speed;
 uniform float u_fps;
 uniform float u_animationMode;
@@ -139,6 +141,19 @@ void main() {
   noise = clamp(0.5 + (noise - 0.5) * (1.0 + u_complexity * 0.35), 0.0, 1.0);
 
   float centeredNoise = noise * 2.0 - 1.0;
+
+  // Une carte de densité plus large regroupe le grain sans créer d'aplat coloré.
+  // Les valeurs positives et négatives gardent le même équilibre : seule leur
+  // présence locale devient plus ou moins forte.
+  if (u_character > 0.001) {
+    vec2 characterPosition = basePosition * 0.28 + vec2(43.0, 79.0);
+    vec2 characterSeed = baseSeed * 0.61 + vec2(149.0, 211.0);
+    float characterNoise = valueNoise(characterPosition, characterSeed);
+    float characterEnvelope = smoothstep(0.12, 0.88, characterNoise);
+    float localDensity = mix(0.25, 1.75, characterEnvelope);
+    centeredNoise *= mix(1.0, localDensity, u_character);
+    centeredNoise = clamp(centeredNoise, -1.0, 1.0);
+  }
 
   // Les valeurs positives déposent la teinte choisie, les négatives du noir.
   float positiveGrain = step(0.0, centeredNoise);
@@ -263,6 +278,7 @@ interface RendererResources {
     time: WebGLUniformLocation;
     blur: WebGLUniformLocation;
     complexity: WebGLUniformLocation;
+    character: WebGLUniformLocation;
     speed: WebGLUniformLocation;
     fps: WebGLUniformLocation;
     animationMode: WebGLUniformLocation;
@@ -305,6 +321,7 @@ function createRendererResources(
         time: getUniform(gl, program, "u_time"),
         blur: getUniform(gl, program, "u_blur"),
         complexity: getUniform(gl, program, "u_complexity"),
+        character: getUniform(gl, program, "u_character"),
         speed: getUniform(gl, program, "u_speed"),
         fps: getUniform(gl, program, "u_fps"),
         animationMode: getUniform(gl, program, "u_animationMode"),
@@ -372,6 +389,11 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     blur: clamp(options.blur ?? preset?.blur ?? DEFAULT_SETTINGS.blur, 0, 1),
     complexity: clamp(
       options.complexity ?? preset?.complexity ?? DEFAULT_SETTINGS.complexity,
+      0,
+      1,
+    ),
+    character: clamp(
+      options.character ?? preset?.character ?? DEFAULT_SETTINGS.character,
       0,
       1,
     ),
@@ -506,6 +528,7 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     gl.uniform1f(uniforms.time, elapsedTime);
     gl.uniform1f(uniforms.blur, settings.blur);
     gl.uniform1f(uniforms.complexity, settings.complexity);
+    gl.uniform1f(uniforms.character, settings.character);
     gl.uniform1f(uniforms.speed, settings.speed);
     gl.uniform1f(uniforms.fps, settings.fps);
     gl.uniform1f(uniforms.animationMode, settings.animationMode === "flow" ? 1 : 0);
@@ -664,6 +687,10 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
 
       if (resolvedOptions.complexity !== undefined) {
         settings.complexity = clamp(resolvedOptions.complexity, 0, 1);
+      }
+
+      if (resolvedOptions.character !== undefined) {
+        settings.character = clamp(resolvedOptions.character, 0, 1);
       }
 
       if (resolvedOptions.speed !== undefined) {
