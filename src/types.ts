@@ -6,6 +6,7 @@ export type GrainBlendMode =
   | "multiply"
   | "screen";
 export type GrainQualityMode = "fixed" | "auto";
+export type GrainMaskMode = "none" | "text";
 
 export type GrainPresetName =
   | "8mm"
@@ -55,6 +56,8 @@ export interface GrainOptions extends Partial<GrainSettings> {
   respectReducedMotion?: boolean;
   /** Keeps full quality or adapts rendering cost to frame stability. */
   quality?: GrainQualityMode;
+  /** Limits the grain to the target's text glyphs. Defaults to none. */
+  mask?: GrainMaskMode;
 }
 
 export interface GrainUpdateOptions extends Partial<GrainSettings> {
@@ -64,6 +67,8 @@ export interface GrainUpdateOptions extends Partial<GrainSettings> {
   respectReducedMotion?: boolean;
   /** Keeps full quality or adapts rendering cost to frame stability. */
   quality?: GrainQualityMode;
+  /** Limits the grain to the target's text glyphs. */
+  mask?: GrainMaskMode;
 }
 
 export interface GrainMetrics {

@@ -1,6 +1,6 @@
 # Pardigon
 
-#### Current version: v0.7.0
+#### Current version: v0.8.0
 
 Procedural cinematic grain for the web.
 
@@ -10,9 +10,9 @@ Pardigon is a small TypeScript and WebGL2 library that adds texture and atmosphe
 
 ## Why Pardigon
 
-After ten years as an art director, I know how easily digital images can feel too clean.
+After 10 years as an art director, I know how easily digital images can feel too clean.
 
-A subtle layer of grain can make a visual feel more organic and interesting. I built Pardigon to bring that material quality to websites and web applications, with direct control over the grain's size, strength, colour, detail and movement.
+A subtle layer of grain can make a big difference. Visuals feel more organic and interesting. So I built Pardigon to bring that idea to websites and web applications, with direct control over the grain's size, strength, colour, details, movement and more.
 
 The library stays small and leaves the final look to the person using it.
 
@@ -20,25 +20,42 @@ The library stays small and leaves the final look to the person using it.
 
 Pardigon is named after [*Après-midi à Pardigon*](https://www.musee-orsay.fr/en/artworks/apres-midi-pardigon-151), a 1907 painting by French Neo-Impressionist artist Henri-Edmond Cross.
 
-Cross built the landscape from separate touches of colour that come together in the eye. Pardigon follows a similar principle: many small variations become one texture. The painting's light and Mediterranean atmosphere also shaped the visual direction of the project.
+Cross built the landscape from separate touches of colour that come together in the eye. Pardigon follows a similar principle: many small variations become a unique texture.
+
+The painting's light and Mediterranean atmosphere also shaped the visual direction of the project.
+Dedicated color scheme:
+- Sunset Orange  #f45a0a
+- Mediterranean Blue  #0f3477
+- Calanque Beige  #ede5d6
+- Sail White  #fefff8
+- Ultramarine Black  #00050f
 
 ## Creative direction and process
 
-Visual tests shaped Pardigon from the start. Each shader change had to improve the material on screen and stay practical on a full-size website.
+I used AI assistance to help write and iterate on the `TypeScript`, `WebGL2` and `GLSL` implementation. I chose what Pardigon should do, set its technical limits, reviewed every feature, tested it on desktop and mobile, art directed and tuned the presets.
 
-An early version of Fog simply renewed the noise after a set interval. The result resembled pixels being replaced. Fog needed to travel through the image, so I redirected the animation toward translation on the X and Y axes while the noise continued to change shape. Film grain kept its position and renewed its structure. Those two behaviours became `evolve` and `flow`.
+Here are a few examples of the multiple decisions I made:
 
-Large blurred grain exposed another problem. It became a soft mass of digital blocks with very little structure. That test led to `complexity`, which adds secondary detail, and `character`, which creates clusters and calmer areas without using a texture or another render pass.
+#### 1) Crafting the animation type
+An early version of `Fog` simply renewed the noise after a set interval. The result resembled pixels being replaced. `Fog` needed to travel through the image, so I redirected the animation toward translation on the `X` and `Y` axes while the noise continued to change shape. Film grain kept its position and renewed its structure. Those 2 behaviours became `evolve` and `flow`.
 
-The timing also needed to match the material. Running every effect at 30 or 60 FPS made the 8mm preset feel too modern. Pardigon now controls its rendering cadence independently from the screen, with 8mm set to 12 FPS and 16mm set to 14 FPS.
+#### 2) Detailing noise with precision
+Large blurred grain exposed another problem. It became a soft mass of digital blocks with very little structure. That test led to `complexity`, which adds secondary detail, and `character`, which creates clusters and softer areas without using a texture or another render pass.
 
-I used AI assistance to help write and iterate on the TypeScript, WebGL2 and GLSL implementation. I chose what Pardigon should do, set its technical limits, reviewed the noise in motion, tested it on desktop and iPhone, and tuned the presets. Those browser tests decided which changes stayed.
+#### 3) Setting time boundaries to add style choices
+The timing also needed to match the material. Running every effect at `30 FPS` or `60 FPS` made the `8mm` preset feel way too modern. Pardigon now controls its rendering cadence independently from the screen, with `8mm` set to `12 FPS` and `16mm` set to `14 FPS`.
+
+#### 4) Art directing imperfection
+
+Film texture also gets its character from small irregularities. I introduced `flicker` to create subtle exposure changes and `dirt` to generate sparse marks that briefly appear across the image.
+
+Both effects were carefully limited and assigned only where they made visual sense. They give the `8mm` and `16mm` presets a more physical quality, while cleaner presets remain untouched.
 
 ## Highlights
 
 - Procedural WebGL2 grain
 - Custom grain colour
-- Five backdrop blend modes
+- 5 backdrop blend modes
 - Fullscreen and local element overlays
 - Separate `evolve` and `flow` animation modes
 - Adjustable detail, clustering and continuity
@@ -82,7 +99,7 @@ Every option is optional. `target` defaults to `document.body`, while explicit v
 
 ## Choose a preset
 
-Pardigon includes six starting points:
+Pardigon includes 6 starting points:
 
 - `8mm` for coarse, low-frame-rate film grain
 - `16mm` for slightly finer film grain
@@ -91,7 +108,7 @@ Pardigon includes six starting points:
 - `pixel` for hard digital noise
 - `fog` for large, soft layers in motion
 
-Use one directly:
+Use a preset directly:
 
 ```ts
 createGrain({ target: document.body, preset: "16mm" });
@@ -122,6 +139,21 @@ createGrain({
   animated: true,
 });
 ```
+
+### Text masks
+
+Use `mask: "text"` on a single-line text element to keep the grain inside its glyphs:
+
+```ts
+createGrain({
+  target: document.querySelector("h2") as HTMLElement,
+  preset: "16mm",
+  color: "#90ff00",
+  mask: "text",
+});
+```
+
+The text stays in the DOM and remains accessible. Pardigon rasterizes its shape again when the element is resized, its content changes or its web font finishes loading. The procedural grain still runs on the GPU.
 
 When the effect is optional, check for WebGL2 first:
 
@@ -169,11 +201,11 @@ createGrain({
 
 `flicker` adds small, irregular exposure changes. Its signal combines slow brightness drift, frame-level instability and occasional short jumps. `0` disables it and `1` applies the strongest setting.
 
-The black or white overlay is capped at 9% opacity. Pardigon calculates one temporal value per rendered frame on the CPU, then the GPU composites it with the grain. Flicker stops with the animation and follows reduced-motion settings.
+The black or white overlay is capped at 9% opacity. Pardigon calculates 1 temporal value per rendered frame on the CPU, then the GPU composites it with the grain. Flicker stops with the animation and follows reduced-motion settings.
 
 ## Film dirt
 
-`dirt` adds sparse black spots and occasional light marks inspired by dust and damage on physical film. Each mark stays fixed for two to six grain frames before changing. There is no smooth particle movement.
+`dirt` adds sparse black spots and occasional light marks inspired by dust and damage on physical film. Each mark stays fixed for 2 to 6 grain frames before changing. There is no smooth particle movement.
 
 The fragment shader builds the marks from large spatial cells and simple irregular shapes. This adds no texture asset, CPU pixel generation or extra render pass. `0` disables the layer and `1` applies the strongest setting.
 
@@ -233,7 +265,7 @@ const {
 
 `gpuTimeMs` measures Pardigon's draw call rather than the device's total GPU usage. The [live demo](https://pardigon.vercel.app) also measures page FPS and frame stability with `requestAnimationFrame`, including on browsers that do not expose the GPU timer.
 
-`effectiveFps` is the active target after mobile and automatic-quality limits. `actualFps` is the measured draw rate from the latest one-second sample. `lateFrames` counts frames missed from that target, while refreshes intentionally skipped by a lower `fps` setting are ignored. `renderedFrames` counts successful draw calls, and `frameTimeP95Ms` reports the 95th percentile of the intervals between them.
+`effectiveFps` is the active target after mobile and automatic-quality limits. `actualFps` is the measured draw rate from the latest 1-second sample. `lateFrames` counts frames missed from that target, while refreshes intentionally skipped by a lower `fps` setting are ignored. `renderedFrames` counts successful draw calls, and `frameTimeP95Ms` reports the 95th percentile of the intervals between them.
 
 ## Options
 
@@ -243,6 +275,7 @@ const {
 | `preset` | Built-in visual starting point | none |
 | `respectReducedMotion` | Freezes animation when reduced motion is requested | `true` |
 | `quality` | Uses `fixed` quality or adapts cost with `auto` | `fixed` |
+| `mask` | `none` or `text`; clips grain to a single-line target's glyphs | `none` |
 | `intensity` | Grain strength, from `0` to `1` | `0.06` |
 | `color` | Grain tint as `#RGB` or `#RRGGBB` | `#ffffff` |
 | `blendMode` | `normal`, `soft-light`, `overlay`, `multiply` or `screen` | `normal` |
@@ -260,15 +293,15 @@ const {
 
 ## Performance
 
-The shader draws one triangle for each grain surface. Static grain has no continuous render loop. Animated grain uses the selected frame rate as an upper limit and pauses when the page is hidden or a local target leaves the viewport. Reduced-motion settings make the grain static by default.
+The shader draws 1 triangle for each grain surface. Static grain has no continuous render loop. Animated grain uses the selected frame rate as an upper limit and pauses when the page is hidden or a local target leaves the viewport. Reduced-motion settings make the grain static by default.
 
 Pardigon rebuilds its GPU resources if the browser loses and restores the WebGL context.
 
 Render resolution is capped on high-density screens at 1x device pixel ratio on viewports of 768px or less, and 1.5x on wider viewports. The actual cost depends on screen size, device, grain complexity and the number of active surfaces.
 
-With `quality: "auto"`, Pardigon checks frame stability inside the animation loop. It lowers quality after two poor one-second samples and waits for five stable samples before moving back up. This delay avoids rapid changes between levels.
+With `quality: "auto"`, Pardigon checks frame stability inside the animation loop. It lowers quality after 2 poor 1-second samples and waits for 5 stable samples before moving back up. This delay avoids rapid changes between levels.
 
-The four quality levels reduce internal resolution first, remove the detail layer second and lower rendering FPS last. The minimum level uses 55% of the base render resolution, removes the additional detail layer and uses 75% of the selected frame rate. It does not overwrite the original settings.
+The 4 quality levels reduce internal resolution first, remove the detail layer second and lower rendering FPS last. The minimum level uses 55% of the base render resolution, removes the additional detail layer and uses 75% of the selected frame rate. It does not overwrite the original settings.
 
 Blend-mode composition happens after the WebGL draw and may not appear in `gpuTimeMs`. Compare page FPS and frame stability when testing those modes. Test the library on the phones and computers your project actually targets.
 
@@ -278,7 +311,7 @@ Blend-mode composition happens after the WebGL draw and may not appear in `gpuTi
 
 - [x] Better performance measurements
 - [x] Automatic quality
-- [ ] Masks and local regions
+- [x] Masks and local regions
 - [x] More temporal control
 - [x] Grain character
 - [x] Film dirt and impurities
@@ -300,13 +333,13 @@ The frame scheduler carries its remaining time between screen refreshes, which k
 
 ### 3. Masks and local regions
 
-This part is still being explored. Possible masks include radial areas, directional gradients, pointer-controlled regions and image masks.
+`mask: "text"` limits the WebGL result to the glyphs of a single-line target. Pardigon rasterizes the text only when its layout changes and samples that alpha map in the fragment shader. The animated noise stays procedural and GPU-generated.
 
-A small reveal should render a small moving canvas where possible. For example, a 200 × 200 pixel pointer mask should not process the complete element behind it.
+Local element targets and small moving canvases avoid processing areas that do not need grain. Radial, directional and image masks remain possible later extensions.
 
 ### 4. More temporal control
 
-`continuity` ranges from a hard renewal at `0` to a continuous transformation at `1`. Intermediate values retain part of the previous visual structure. Values above `0` need one additional noise sample in the shader.
+`continuity` ranges from a hard renewal at `0` to a continuous transformation at `1`. Intermediate values retain part of the previous visual structure. Values above `0` need 1 additional noise sample in the shader.
 
 Current preset values:
 

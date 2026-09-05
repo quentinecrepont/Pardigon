@@ -4,6 +4,7 @@ export type {
   GrainAnimationMode,
   GrainBlendMode,
   GrainInstance,
+  GrainMaskMode,
   GrainMetrics,
   GrainOptions,
   GrainPresetName,

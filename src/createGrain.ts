@@ -4,6 +4,7 @@ import { calculateFrameSchedule } from "./frameScheduler";
 import { calculateFlickerExposure } from "./flicker";
 import type {
   GrainInstance,
+  GrainMaskMode,
   GrainMetrics,
   GrainOptions,
   GrainPresetName,
@@ -15,6 +16,7 @@ export type {
   GrainAnimationMode,
   GrainBlendMode,
   GrainInstance,
+  GrainMaskMode,
   GrainMetrics,
   GrainOptions,
   GrainPresetName,
@@ -81,6 +83,8 @@ uniform float u_dirt;
 uniform float u_speed;
 uniform float u_fps;
 uniform float u_animationMode;
+uniform float u_maskEnabled;
+uniform sampler2D u_maskTexture;
 
 out vec4 outColor;
 
@@ -328,6 +332,16 @@ void main() {
     combinedAlpha = dirt.x + combinedAlpha * (1.0 - dirt.x);
   }
 
+  // A text mask is rasterized only when its layout changes. The GPU samples
+  // that alpha map here, so every animated grain frame stays inside the glyphs.
+  if (u_maskEnabled > 0.5) {
+    vec2 maskSize = vec2(textureSize(u_maskTexture, 0));
+    vec2 maskUv = gl_FragCoord.xy / maskSize;
+    float maskAlpha = texture(u_maskTexture, maskUv).a;
+    combinedColor *= maskAlpha;
+    combinedAlpha *= maskAlpha;
+  }
+
   outColor = vec4(combinedColor, combinedAlpha);
 }
 `;
@@ -377,6 +391,13 @@ function resolvePreset(
   }
 
   return preset;
+}
+
+function resolveMaskMode(value: GrainMaskMode | undefined): GrainMaskMode {
+  if (value === undefined || value === "none") return "none";
+  if (value === "text") return "text";
+
+  throw new Error(`Pardigon: masque inconnu (${String(value)}).`);
 }
 
 function compileShader(
@@ -445,6 +466,7 @@ interface RendererResources {
   fragmentShader: WebGLShader;
   program: WebGLProgram;
   vertexArray: WebGLVertexArrayObject;
+  maskTexture: WebGLTexture;
   uniforms: {
     intensity: WebGLUniformLocation;
     color: WebGLUniformLocation;
@@ -460,6 +482,8 @@ interface RendererResources {
     speed: WebGLUniformLocation;
     fps: WebGLUniformLocation;
     animationMode: WebGLUniformLocation;
+    maskEnabled: WebGLUniformLocation;
+    maskTexture: WebGLUniformLocation;
   };
 }
 
@@ -475,15 +499,21 @@ function createRendererResources(
   let fragmentShader: WebGLShader | null = null;
   let program: WebGLProgram | null = null;
   let vertexArray: WebGLVertexArrayObject | null = null;
+  let maskTexture: WebGLTexture | null = null;
 
   try {
     vertexShader = compileShader(gl, gl.VERTEX_SHADER, VERTEX_SHADER);
     fragmentShader = compileShader(gl, gl.FRAGMENT_SHADER, FRAGMENT_SHADER);
     program = createProgram(gl, vertexShader, fragmentShader);
     vertexArray = gl.createVertexArray();
+    maskTexture = gl.createTexture();
 
     if (!vertexArray) {
       throw new Error("Pardigon: impossible de créer le vertex array WebGL2.");
+    }
+
+    if (!maskTexture) {
+      throw new Error("Pardigon: impossible de créer la texture du masque.");
     }
 
     const resources: RendererResources = {
@@ -491,6 +521,7 @@ function createRendererResources(
       fragmentShader,
       program,
       vertexArray,
+      maskTexture,
       uniforms: {
         intensity: getUniform(gl, program, "u_intensity"),
         color: getUniform(gl, program, "u_color"),
@@ -506,13 +537,34 @@ function createRendererResources(
         speed: getUniform(gl, program, "u_speed"),
         fps: getUniform(gl, program, "u_fps"),
         animationMode: getUniform(gl, program, "u_animationMode"),
+        maskEnabled: getUniform(gl, program, "u_maskEnabled"),
+        maskTexture: getUniform(gl, program, "u_maskTexture"),
       },
     };
 
     gl.useProgram(program);
     gl.bindVertexArray(vertexArray);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, maskTexture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      gl.RGBA,
+      1,
+      1,
+      0,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      new Uint8Array([255, 255, 255, 255]),
+    );
+    gl.uniform1i(resources.uniforms.maskTexture, 0);
     return resources;
   } catch (error) {
+    if (maskTexture) gl.deleteTexture(maskTexture);
     if (vertexArray) gl.deleteVertexArray(vertexArray);
     if (program) gl.deleteProgram(program);
     if (vertexShader) gl.deleteShader(vertexShader);
@@ -527,6 +579,7 @@ function deleteRendererResources(
 ): void {
   if (!resources || gl.isContextLost()) return;
   gl.deleteVertexArray(resources.vertexArray);
+  gl.deleteTexture(resources.maskTexture);
   gl.deleteProgram(resources.program);
   gl.deleteShader(resources.vertexShader);
   gl.deleteShader(resources.fragmentShader);
@@ -604,12 +657,14 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
       ?? DEFAULT_SETTINGS.animationMode,
   };
   let colorComponents = hexToRgb(settings.color);
+  let maskMode = resolveMaskMode(options.mask);
 
   const isFullscreenTarget = target === document.body || target === document.documentElement;
   const previousTargetPosition = target.style.position;
   const didSetTargetPosition = !isFullscreenTarget && getComputedStyle(target).position === "static";
 
   const canvas = document.createElement("canvas");
+  const maskCanvas = document.createElement("canvas");
   canvas.dataset.grainOverlay = "";
   canvas.setAttribute("aria-hidden", "true");
   Object.assign(canvas.style, {
@@ -668,6 +723,7 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
   let previousPerformanceRenderTimestamp: number | null = null;
   let resizeObserver: ResizeObserver | null = null;
   let intersectionObserver: IntersectionObserver | null = null;
+  let maskMutationObserver: MutationObserver | null = null;
   const reducedMotionQuery = typeof window.matchMedia === "function"
     ? window.matchMedia("(prefers-reduced-motion: reduce)")
     : null;
@@ -832,6 +888,89 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     frameTimeP95Ms = null;
   };
 
+  const updateMaskTexture = (): void => {
+    const currentResources = resources;
+    if (!currentResources || gl.isContextLost() || maskMode !== "text") return;
+
+    const context = maskCanvas.getContext("2d");
+    if (!context) {
+      throw new Error("Pardigon: impossible de créer le masque texte.");
+    }
+
+    maskCanvas.width = canvas.width;
+    maskCanvas.height = canvas.height;
+    context.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+
+    const style = getComputedStyle(target);
+    const cssWidth = canvas.width / pixelRatio;
+    const cssHeight = canvas.height / pixelRatio;
+    const paddingLeft = Number.parseFloat(style.paddingLeft) || 0;
+    const paddingRight = Number.parseFloat(style.paddingRight) || 0;
+    const paddingTop = Number.parseFloat(style.paddingTop) || 0;
+    const paddingBottom = Number.parseFloat(style.paddingBottom) || 0;
+    const textTransform = style.textTransform;
+    const rawText = target.textContent?.replace(/\s+/g, " ").trim() ?? "";
+    const text = textTransform === "uppercase"
+      ? rawText.toUpperCase()
+      : textTransform === "lowercase"
+        ? rawText.toLowerCase()
+        : rawText;
+
+    context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+    context.fillStyle = "#ffffff";
+    context.textBaseline = "alphabetic";
+    context.textAlign = style.textAlign === "center"
+      ? "center"
+      : style.textAlign === "right" || style.textAlign === "end"
+        ? "right"
+        : "left";
+    context.direction = style.direction === "rtl" ? "rtl" : "ltr";
+    context.font = [
+      style.fontStyle,
+      style.fontVariant,
+      style.fontWeight,
+      style.fontSize,
+      style.fontFamily,
+    ].join(" ");
+
+    const spacedContext = context as CanvasRenderingContext2D & {
+      letterSpacing?: string;
+    };
+    if ("letterSpacing" in spacedContext) {
+      spacedContext.letterSpacing = style.letterSpacing;
+    }
+
+    const x = context.textAlign === "center"
+      ? cssWidth / 2
+      : context.textAlign === "right"
+        ? cssWidth - paddingRight
+        : paddingLeft;
+    const metrics = context.measureText(text);
+    const fontAscent = metrics.fontBoundingBoxAscent
+      || metrics.actualBoundingBoxAscent;
+    const fontDescent = metrics.fontBoundingBoxDescent
+      || metrics.actualBoundingBoxDescent;
+    const contentHeight = cssHeight - paddingTop - paddingBottom;
+    const y = paddingTop
+      + (contentHeight - fontAscent - fontDescent) / 2
+      + fontAscent;
+    context.fillText(text, x, y);
+    context.setTransform(1, 0, 0, 1, 0, 0);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, currentResources.maskTexture);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      gl.RGBA,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      maskCanvas,
+    );
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  };
+
   const render = (timestamp = performance.now()): void => {
     const currentResources = resources;
     if (!currentResources || gl.isContextLost()) return;
@@ -864,6 +1003,9 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     gl.uniform1f(uniforms.speed, settings.speed);
     gl.uniform1f(uniforms.fps, getEffectiveFps());
     gl.uniform1f(uniforms.animationMode, settings.animationMode === "flow" ? 1 : 0);
+    gl.uniform1f(uniforms.maskEnabled, maskMode === "text" ? 1 : 0);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, currentResources.maskTexture);
     const gpuQuery = startGpuTimer();
     try {
       gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -951,6 +1093,7 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     const height = isFullscreenTarget ? window.innerHeight : target.clientHeight;
     canvas.width = Math.max(1, Math.round(width * pixelRatio));
     canvas.height = Math.max(1, Math.round(height * pixelRatio));
+    updateMaskTexture();
     render();
   };
 
@@ -1008,8 +1151,23 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     });
     intersectionObserver.observe(target);
   }
+  if (!isFullscreenTarget && "MutationObserver" in window) {
+    maskMutationObserver = new MutationObserver(() => {
+      if (destroyed || maskMode !== "text") return;
+      updateMaskTexture();
+      render();
+    });
+    maskMutationObserver.observe(target, {
+      characterData: true,
+      childList: true,
+      subtree: true,
+    });
+  }
   resize();
   startLoop();
+  void document.fonts?.ready.then(() => {
+    if (!destroyed && maskMode === "text") resize();
+  });
 
   return {
     update(nextOptions): void {
@@ -1083,6 +1241,11 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
         respectReducedMotion = resolvedOptions.respectReducedMotion;
       }
 
+      if (resolvedOptions.mask !== undefined) {
+        maskMode = resolveMaskMode(resolvedOptions.mask);
+        updateMaskTexture();
+      }
+
       let qualityChanged = false;
       if (resolvedOptions.quality !== undefined) {
         qualityMode = resolvedOptions.quality === "auto" ? "auto" : "fixed";
@@ -1141,6 +1304,7 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
       canvas.removeEventListener("webglcontextrestored", handleContextRestored);
       resizeObserver?.disconnect();
       intersectionObserver?.disconnect();
+      maskMutationObserver?.disconnect();
       if (pendingGpuQuery && !gl.isContextLost()) {
         gl.deleteQuery(pendingGpuQuery);
       }

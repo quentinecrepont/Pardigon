@@ -3,6 +3,7 @@ import {
   grainPresets,
   isWebGL2Supported,
   type GrainInstance,
+  type GrainMaskMode,
   type GrainBlendMode,
   type GrainOptions,
   type GrainPresetName,
@@ -12,12 +13,14 @@ import {
 const preset: GrainPresetName = "8mm";
 const quality: GrainQualityMode = "auto";
 const blendMode: GrainBlendMode = "soft-light";
+const mask: GrainMaskMode = "text";
 const options: GrainOptions = {
   target: document.body,
   preset,
   intensity: grainPresets[preset].intensity,
   color: "#7ac7ff",
   blendMode,
+  mask,
   character: 0.65,
   continuity: 0.8,
   flicker: 0.25,
@@ -31,6 +34,8 @@ if (isWebGL2Supported()) {
   grain.update({ preset: "fog", intensity: 0.05 });
   grain.update({ color: "#1683ff" });
   grain.update({ blendMode: "overlay" });
+  grain.update({ mask: "none" });
+  grain.update({ mask: "text" });
   grain.update({ character: 0.4 });
   grain.update({ continuity: 0.75 });
   grain.update({ flicker: 0.4 });
