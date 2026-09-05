@@ -30,6 +30,9 @@ test("keeps built-in presets immutable", () => {
   assert.equal(grainPresets.paper.character, 0.12);
   assert.equal(grainPresets.pixel.character, 0);
   assert.equal(grainPresets.fog.character, 0.63);
+  assert.equal(grainPresets["8mm"].continuity, 0.2);
+  assert.equal(grainPresets["16mm"].continuity, 0.1);
+  assert.equal(grainPresets.fog.continuity, 0);
 });
 
 test("fails safely outside a browser", () => {

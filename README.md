@@ -1,6 +1,6 @@
 # Pardigon
 
-#### Current version: v0.3.0
+#### Current version: v0.4.0
 
 Procedural cinematic grain for the web.
 
@@ -105,6 +105,7 @@ createGrain({
   blur: 1,
   complexity: 0.42,
   character: 0.7,
+  continuity: 0.8,
   animated: true,
   speed: 1.2,
   fps: 60,
@@ -119,12 +120,15 @@ createGrain({
 
 `fps` controls the grain's temporal frame rate independently from the screen refresh rate. A value of `12`, for example, gives film grain a more stepped rhythm. Wider viewports can render up to `60` FPS. Viewports of `768px` or less are limited to `24` FPS to protect mobile performance.
 
+`continuity` controls how strongly one grain state is connected to the next. `0` keeps the original cut-like animation. Higher values create a smoother transformation. In `flow` mode, it adds shape evolution to the existing spatial movement.
+
 ## Control the effect
 
 Update it, pause it, restart it, or remove it:
 
 ```ts
 grain.update({ intensity: 0.08, size: 4, complexity: 0.6, character: 0.7 });
+grain.update({ continuity: 0.8 });
 grain.update({ color: "#4b8dff" });
 grain.update({ preset: "fog", intensity: 0.05 });
 grain.update({ quality: "auto" });
@@ -148,10 +152,16 @@ const {
   renderScale,
   effectiveFps,
   effectiveComplexity,
+  actualFps,
+  renderedFrames,
+  lateFrames,
+  frameTimeP95Ms,
 } = grain.getMetrics();
 ```
 
 This measures Pardigon's draw call, not the device's total GPU usage. The [live demo](https://pardigon.vercel.app) also shows page FPS and frame stability with `requestAnimationFrame`, including on browsers that do not expose the GPU timer.
+
+`effectiveFps` is the current target after mobile and automatic-quality limits. `actualFps` is the measured Pardigon draw rate over the latest one-second sample. `lateFrames` counts only frames missed from that target; refreshes intentionally skipped by a lower `fps` setting are not treated as late. `renderedFrames` counts every successful draw call since the instance was created, and `frameTimeP95Ms` reports the 95th percentile of the measured intervals between those draws.
 
 ## Options
 
@@ -167,6 +177,7 @@ This measures Pardigon's draw call, not the device's total GPU usage. The [live 
 | `blur` | Softens and connects the noise, from `0` to `1` | `0` |
 | `complexity` | Adds medium and fine detail, from `0` to `1` | `0.35` |
 | `character` | Changes the grain from evenly distributed to clustered, from `0` to `1` | `0` |
+| `continuity` | Links successive grain states, from `0` to `1` | `0` |
 | `animated` | Animates or freezes the grain | `true` |
 | `speed` | Animation speed multiplier | `1` |
 | `fps` | Temporal frame rate, from `1` to `60` | `24` |
@@ -225,26 +236,29 @@ Pardigon will stay focused on procedural grain, texture and atmosphere. These ar
 
 ### Overview
 
-- [ ] Better performance measurements
+- [x] Better performance measurements
 - [x] Automatic quality
 - [ ] Masks and local regions
-- [ ] More temporal control
+- [x] More temporal control
 - [x] Grain character
+- [ ] Film dirt and impurities
+- [ ] Film flicker
 - [ ] Later explorations
 
 A section will be checked when its work is complete and available in the public API.
 
 ### 1. Better performance measurements
 
-The first step is to record the current cost on desktop and mobile devices. The metrics API may grow to include:
+The metrics API now reports:
 
-- Effective rendering FPS
-- Dropped frames
-- Number of rendered frames
-- Internal render scale
+- Target and actual rendering FPS
+- Late frames relative to Pardigon's selected cadence
+- Total rendered frames
+- The 95th percentile of render intervals
+- Internal render scale and effective complexity
 - GPU draw time when the browser makes it available
 
-These measurements will help compare presets and future changes. They will also provide useful information on iOS, where GPU timing is often unavailable.
+The cadence scheduler keeps its remaining time between display refreshes, so targets such as `24` FPS stay close to their requested average on a `60` Hz display. These measurements will help compare presets and future changes. They also provide useful information on iOS, where GPU timing is often unavailable.
 
 ### 2. Automatic quality
 
@@ -265,13 +279,22 @@ Small interactive regions should use a small moving canvas where possible. A 200
 
 ### 4. More temporal control
 
-The animation system could offer three clear temporal styles:
+The `continuity` option controls the relationship between successive grain states:
 
-- `cut` for a new state on each grain frame
-- `morph` for continuous transformation
-- `flow` for spatial movement and evolution
+- `0` keeps a hard renewal for film-like grain
+- Intermediate values retain part of the previous visual structure
+- `1` produces a continuous transformation
 
-A `persistence` control could define how long a shape remains visible. Low persistence would suit fast film grain. High persistence would create more natural fog and slow atmospheric layers.
+In `evolve` mode, the shader blends neighbouring procedural noise states. In `flow` mode, continuity adds shape evolution while the field moves across the surface. Everything remains procedural and runs in the same WebGL2 shader. Values above `0` require one additional noise sample, so the control has a real but bounded GPU cost.
+
+Current preset values:
+
+- `8mm`: `0.2`
+- `16mm`: `0.1`
+- `35mm`: `0`
+- `paper`: `0`
+- `pixel`: `0`
+- `fog`: `0`
 
 ### 5. Grain character
 
@@ -291,6 +314,18 @@ Current preset values:
 - `paper`: `0.12`
 - `pixel`: `0`
 - `fog`: `0.63`
+
+### 6. Film dirt and impurities
+
+A future `dirt` control could add sparse black spots and dust marks inspired by physical film. These impurities should appear occasionally, persist for a short time and avoid the constant flicker of regular grain.
+
+The effect should remain procedural, with no texture assets or additional CPU pixel generation. It will need careful temporal behaviour so the marks feel like film imperfections instead of another noise layer.
+
+### 7. Film flicker
+
+A `flicker` control could recreate the small exposure changes found in older film. The brightness would drift slightly, with occasional irregular jumps instead of a clean repeating pulse.
+
+The first version should use one simple amount control. Its temporal signal should combine slow variation with sparse, sharper changes, while avoiding distracting flashes. The effect can remain procedural in the existing shader and should add very little rendering cost.
 
 ### Later explorations
 

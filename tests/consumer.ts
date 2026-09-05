@@ -16,6 +16,7 @@ const options: GrainOptions = {
   intensity: grainPresets[preset].intensity,
   color: "#7ac7ff",
   character: 0.65,
+  continuity: 0.8,
   quality,
   respectReducedMotion: true,
 };
@@ -25,6 +26,7 @@ if (isWebGL2Supported()) {
   grain.update({ preset: "fog", intensity: 0.05 });
   grain.update({ color: "#1683ff" });
   grain.update({ character: 0.4 });
+  grain.update({ continuity: 0.75 });
   grain.update({ quality: "fixed" });
   grain.update({ quality: "auto" });
   grain.update({ respectReducedMotion: false });
@@ -36,6 +38,10 @@ if (isWebGL2Supported()) {
   metrics.renderScale;
   metrics.effectiveFps;
   metrics.effectiveComplexity;
+  metrics.actualFps;
+  metrics.renderedFrames;
+  metrics.lateFrames;
+  metrics.frameTimeP95Ms;
   grain.pause();
   grain.play();
   grain.destroy();

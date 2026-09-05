@@ -24,6 +24,8 @@ export interface GrainSettings {
   complexity: number;
   /** Controls the spatial clustering of the grain, between 0 and 1. */
   character: number;
+  /** Links successive noise states, between hard cuts and continuous evolution. */
+  continuity: number;
   /** Multiplies the animation speed. */
   speed: number;
   /** Temporal frame rate used by the grain. */
@@ -67,6 +69,14 @@ export interface GrainMetrics {
   effectiveFps: number;
   /** Current shader complexity after adaptation. */
   effectiveComplexity: number;
+  /** Actual Pardigon draw rate sampled over the latest one-second window. */
+  actualFps: number | null;
+  /** Total successful draw calls since this grain instance was created. */
+  renderedFrames: number;
+  /** Scheduled grain frames missed because rendering arrived too late. */
+  lateFrames: number;
+  /** 95th percentile of actual intervals between Pardigon draw calls. */
+  frameTimeP95Ms: number | null;
 }
 
 export interface GrainInstance {

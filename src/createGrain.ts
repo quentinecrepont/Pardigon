@@ -1,4 +1,5 @@
 import { grainPresets } from "./presets";
+import { calculateFrameSchedule } from "./frameScheduler";
 import type {
   GrainInstance,
   GrainMetrics,
@@ -27,6 +28,7 @@ const DEFAULT_SETTINGS: Readonly<GrainSettings> = Object.freeze({
   blur: 0,
   complexity: 0.35,
   character: 0,
+  continuity: 0,
   speed: 1,
   fps: 24,
   animationMode: "evolve",
@@ -43,6 +45,7 @@ const AUTO_QUALITY_SAMPLE_DURATION_MS = 1_000;
 const AUTO_QUALITY_SLOW_FRAME_MS = 24;
 const AUTO_QUALITY_POOR_SAMPLE_COUNT = 2;
 const AUTO_QUALITY_STABLE_SAMPLE_COUNT = 5;
+const PERFORMANCE_SAMPLE_DURATION_MS = 1_000;
 
 const VERTEX_SHADER = `#version 300 es
 void main() {
@@ -66,6 +69,7 @@ uniform float u_time;
 uniform float u_blur;
 uniform float u_complexity;
 uniform float u_character;
+uniform float u_continuity;
 uniform float u_speed;
 uniform float u_fps;
 uniform float u_animationMode;
@@ -96,6 +100,71 @@ float valueNoise(vec2 position, vec2 seedOffset) {
   return mix(top, bottom, curve.y);
 }
 
+// Links neighbouring noise states without storing textures or previous frames.
+float morphNoise(
+  vec2 position,
+  vec2 seedScale,
+  vec2 seedOffset,
+  float animationTime
+) {
+  float currentSlice = floor(animationTime);
+  float transition = fract(animationTime);
+  transition = transition * transition * transition
+    * (transition * (transition * 6.0 - 15.0) + 10.0);
+
+  float currentNoise = valueNoise(
+    position,
+    seedOffset + currentSlice * seedScale
+  );
+  float nextNoise = valueNoise(
+    position,
+    seedOffset + (currentSlice + 1.0) * seedScale
+  );
+  return mix(currentNoise, nextNoise, transition);
+}
+
+float temporalNoise(
+  vec2 position,
+  vec2 seedScale,
+  vec2 seedOffset,
+  float temporalFrame,
+  float animationTime,
+  bool usesFlow
+) {
+  if (usesFlow) {
+    // Flow already preserves its field while moving it. Continuity makes that
+    // field evolve as well, at a rate independent from the display refresh.
+    if (u_continuity < 0.001) {
+      return valueNoise(position, seedOffset);
+    }
+
+    return morphNoise(
+      position,
+      seedScale,
+      seedOffset,
+      animationTime * u_continuity
+    );
+  }
+
+  if (u_continuity < 0.001) {
+    float hardFrame = floor(temporalFrame * u_speed);
+    return valueNoise(
+      position,
+      seedOffset + hardFrame * seedScale
+    );
+  }
+
+  // At 0, the phase advances by roughly one state per grain frame. At 1,
+  // it advances by one smoothly interpolated state per second.
+  float temporalRate = mix(u_fps, 1.0, u_continuity);
+  return morphNoise(
+    position,
+    seedScale,
+    seedOffset,
+    animationTime * temporalRate
+  );
+}
+
 void main() {
   // Plusieurs pixels voisins partagent une même zone lorsque u_size augmente.
   float cellSize = max(u_size * u_pixelRatio, 1.0);
@@ -108,10 +177,7 @@ void main() {
   bool usesFlow = u_animationMode > 0.5;
 
   vec2 basePosition = grainPosition;
-  vec2 baseSeed = vec2(
-    floor(temporalFrame * u_speed) * 17.0,
-    floor(temporalFrame * u_speed) * 29.0
-  );
+  vec2 baseSeedScale = vec2(17.0, 29.0);
 
   if (usesFlow) {
     // Le champ glisse lentement et ondule sur les deux axes.
@@ -120,16 +186,22 @@ void main() {
       animationTime * 0.17 + cos(animationTime * 0.23) * 0.28
     );
     basePosition += baseFlow;
-    baseSeed = vec2(0.0);
   }
 
-  float noise = valueNoise(basePosition, baseSeed);
+  float noise = temporalNoise(
+    basePosition,
+    baseSeedScale,
+    vec2(0.0),
+    temporalFrame,
+    animationTime,
+    usesFlow
+  );
 
   // Une deuxième couche se déplace dans une autre direction.
   // Le déphasage entre les deux crée une évolution sans régénération brutale.
   if (u_complexity > 0.001) {
     vec2 detailPosition = grainPosition * 3.15;
-    vec2 detailSeed = baseSeed * 1.37 + vec2(71.0, 113.0);
+    vec2 detailSeedScale = baseSeedScale * 1.37;
 
     if (usesFlow) {
       vec2 detailFlow = vec2(
@@ -137,10 +209,16 @@ void main() {
         animationTime * 0.51 + sin(animationTime * 0.27) * 0.32
       );
       detailPosition += detailFlow;
-      detailSeed = vec2(71.0, 113.0);
     }
 
-    float detailNoise = valueNoise(detailPosition, detailSeed);
+    float detailNoise = temporalNoise(
+      detailPosition,
+      detailSeedScale,
+      vec2(71.0, 113.0),
+      temporalFrame,
+      animationTime,
+      usesFlow
+    );
     noise = mix(noise, detailNoise, u_complexity * 0.34);
 
     // Une transformation ridged ajoute du relief sans nouvel échantillon de bruit.
@@ -161,8 +239,15 @@ void main() {
   // présence locale devient plus ou moins forte.
   if (u_character > 0.001) {
     vec2 characterPosition = basePosition * 0.28 + vec2(43.0, 79.0);
-    vec2 characterSeed = baseSeed * 0.61 + vec2(149.0, 211.0);
-    float characterNoise = valueNoise(characterPosition, characterSeed);
+    vec2 characterSeedScale = baseSeedScale * 0.61;
+    float characterNoise = temporalNoise(
+      characterPosition,
+      characterSeedScale,
+      vec2(149.0, 211.0),
+      temporalFrame,
+      animationTime,
+      usesFlow
+    );
     float characterEnvelope = smoothstep(0.12, 0.88, characterNoise);
     float localDensity = mix(0.25, 1.75, characterEnvelope);
     centeredNoise *= mix(1.0, localDensity, u_character);
@@ -302,6 +387,7 @@ interface RendererResources {
     blur: WebGLUniformLocation;
     complexity: WebGLUniformLocation;
     character: WebGLUniformLocation;
+    continuity: WebGLUniformLocation;
     speed: WebGLUniformLocation;
     fps: WebGLUniformLocation;
     animationMode: WebGLUniformLocation;
@@ -345,6 +431,7 @@ function createRendererResources(
         blur: getUniform(gl, program, "u_blur"),
         complexity: getUniform(gl, program, "u_complexity"),
         character: getUniform(gl, program, "u_character"),
+        continuity: getUniform(gl, program, "u_continuity"),
         speed: getUniform(gl, program, "u_speed"),
         fps: getUniform(gl, program, "u_fps"),
         animationMode: getUniform(gl, program, "u_animationMode"),
@@ -420,6 +507,11 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
       0,
       1,
     ),
+    continuity: clamp(
+      options.continuity ?? preset?.continuity ?? DEFAULT_SETTINGS.continuity,
+      0,
+      1,
+    ),
     speed: Math.max(options.speed ?? preset?.speed ?? DEFAULT_SETTINGS.speed, 0.05),
     fps: clamp(options.fps ?? preset?.fps ?? DEFAULT_SETTINGS.fps, 1, 60),
     animationMode:
@@ -470,7 +562,7 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
   let animationFrameId: number | null = null;
   let elapsedTime = 0;
   let previousTimestamp: number | null = null;
-  let lastRenderTimestamp = -Infinity;
+  let lastRenderTimestamp: number | null = null;
   let pixelRatio = 1;
   let destroyed = false;
   let targetVisible = true;
@@ -481,6 +573,14 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
   let qualityFrameIntervals: number[] = [];
   let poorQualitySampleCount = 0;
   let stableQualitySampleCount = 0;
+  let renderedFrames = 0;
+  let lateFrames = 0;
+  let actualFps: number | null = null;
+  let frameTimeP95Ms: number | null = null;
+  let performanceSampleStartedAt = performance.now();
+  let performanceSampleRenderedFrames = 0;
+  let performanceFrameIntervals: number[] = [];
+  let previousPerformanceRenderTimestamp: number | null = null;
   let resizeObserver: ResizeObserver | null = null;
   let intersectionObserver: IntersectionObserver | null = null;
   const reducedMotionQuery = typeof window.matchMedia === "function"
@@ -613,7 +713,41 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     pendingGpuQuery = query;
   };
 
-  const render = (): void => {
+  const recordRenderedFrame = (timestamp: number): void => {
+    renderedFrames += 1;
+    performanceSampleRenderedFrames += 1;
+
+    if (previousPerformanceRenderTimestamp !== null) {
+      const interval = timestamp - previousPerformanceRenderTimestamp;
+      if (interval > 0) performanceFrameIntervals.push(interval);
+    }
+
+    previousPerformanceRenderTimestamp = timestamp;
+  };
+
+  const updatePerformanceSample = (timestamp: number): void => {
+    const sampleDuration = timestamp - performanceSampleStartedAt;
+    if (sampleDuration < PERFORMANCE_SAMPLE_DURATION_MS) return;
+
+    actualFps = (performanceSampleRenderedFrames * 1_000) / sampleDuration;
+    frameTimeP95Ms = performanceFrameIntervals.length > 0
+      ? percentile(performanceFrameIntervals, 0.95)
+      : null;
+    performanceSampleStartedAt = timestamp;
+    performanceSampleRenderedFrames = 0;
+    performanceFrameIntervals = [];
+  };
+
+  const resetPerformanceSample = (timestamp = performance.now()): void => {
+    performanceSampleStartedAt = timestamp;
+    performanceSampleRenderedFrames = 0;
+    performanceFrameIntervals = [];
+    previousPerformanceRenderTimestamp = null;
+    actualFps = null;
+    frameTimeP95Ms = null;
+  };
+
+  const render = (timestamp = performance.now()): void => {
     const currentResources = resources;
     if (!currentResources || gl.isContextLost()) return;
 
@@ -629,12 +763,14 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     gl.uniform1f(uniforms.blur, settings.blur);
     gl.uniform1f(uniforms.complexity, getEffectiveComplexity());
     gl.uniform1f(uniforms.character, settings.character);
+    gl.uniform1f(uniforms.continuity, settings.continuity);
     gl.uniform1f(uniforms.speed, settings.speed);
     gl.uniform1f(uniforms.fps, getEffectiveFps());
     gl.uniform1f(uniforms.animationMode, settings.animationMode === "flow" ? 1 : 0);
     const gpuQuery = startGpuTimer();
     try {
       gl.drawArrays(gl.TRIANGLES, 0, 3);
+      recordRenderedFrame(timestamp);
     } finally {
       finishGpuTimer(gpuQuery);
     }
@@ -662,10 +798,20 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     if (qualityChanged) {
       resize();
       lastRenderTimestamp = timestamp;
-    } else if (timestamp - lastRenderTimestamp >= 1000 / targetFps) {
-      render();
-      lastRenderTimestamp = timestamp;
+    } else {
+      const schedule = calculateFrameSchedule(
+        timestamp,
+        lastRenderTimestamp,
+        targetFps,
+      );
+
+      if (schedule.shouldRender) {
+        lateFrames += schedule.lateFrames;
+        render(timestamp);
+        lastRenderTimestamp = schedule.nextRenderTimestamp;
+      }
     }
+    updatePerformanceSample(timestamp);
     animationFrameId = requestAnimationFrame(loop);
   };
 
@@ -679,6 +825,8 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
       && animationFrameId === null
     ) {
       resetQualitySamples();
+      resetPerformanceSample();
+      lastRenderTimestamp = null;
       animationFrameId = requestAnimationFrame(loop);
     }
   };
@@ -689,8 +837,11 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
       animationFrameId = null;
     }
     previousTimestamp = null;
+    lastRenderTimestamp = null;
     qualitySampleStartedAt = null;
     qualityFrameIntervals = [];
+    resetPerformanceSample();
+    actualFps = 0;
   };
 
   const resize = (): void => {
@@ -801,12 +952,17 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
         settings.character = clamp(resolvedOptions.character, 0, 1);
       }
 
+      if (resolvedOptions.continuity !== undefined) {
+        settings.continuity = clamp(resolvedOptions.continuity, 0, 1);
+      }
+
       if (resolvedOptions.speed !== undefined) {
         settings.speed = Math.max(resolvedOptions.speed, 0.05);
       }
 
       if (resolvedOptions.fps !== undefined) {
         settings.fps = clamp(resolvedOptions.fps, 1, 60);
+        lastRenderTimestamp = null;
       }
 
       if (resolvedOptions.animationMode !== undefined) {
@@ -823,6 +979,7 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
         qualityChanged = qualityLevel !== 0;
         qualityLevel = 0;
         resetQualitySamples();
+        lastRenderTimestamp = null;
       }
 
       if (shouldAnimate()) startLoop();
@@ -833,6 +990,8 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
 
     getMetrics(): GrainMetrics {
       pollGpuTimer();
+      updatePerformanceSample(performance.now());
+      const isAnimationRunning = animationFrameId !== null;
       return {
         gpuTimeMs,
         gpuTimerSupported: gpuTimerExtension !== null,
@@ -841,6 +1000,10 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
         renderScale: getQualityLevel().renderScale,
         effectiveFps: getEffectiveFps(),
         effectiveComplexity: getEffectiveComplexity(),
+        actualFps: isAnimationRunning ? actualFps : 0,
+        renderedFrames,
+        lateFrames,
+        frameTimeP95Ms: isAnimationRunning ? frameTimeP95Ms : null,
       };
     },
 

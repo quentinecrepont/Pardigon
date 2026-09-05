@@ -1,6 +1,6 @@
 {
   "name": "pardigon",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Lightweight procedural cinematic grain for the web.",
   "license": "MIT",
   "author": "Quentin Ecrepont",
@@ -44,7 +44,7 @@
     "build": "npm run build:lib",
     "build:lib": "npm run typecheck && vite build && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build:lib && tsc -p tsconfig.test.json && node --test tests/public-api.test.mjs",
+    "test": "npm run build:lib && tsc -p tsconfig.test.json && tsc -p tsconfig.unit.json && node --test tests/public-api.test.mjs tests/frame-scheduler.test.mjs",
     "prepare": "npm run build:lib"
   },
   "devDependencies": {
