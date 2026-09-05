@@ -1,4 +1,10 @@
 export type GrainAnimationMode = "evolve" | "flow";
+export type GrainBlendMode =
+  | "normal"
+  | "soft-light"
+  | "overlay"
+  | "multiply"
+  | "screen";
 export type GrainQualityMode = "fixed" | "auto";
 
 export type GrainPresetName =
@@ -14,6 +20,8 @@ export interface GrainSettings {
   intensity: number;
   /** Tint applied to the light part of the grain as a CSS hex color. */
   color: string;
+  /** Controls how the complete grain canvas blends with its backdrop. */
+  blendMode: GrainBlendMode;
   /** Grain cell size in CSS pixels. */
   size: number;
   /** Animates or freezes the grain. */
@@ -28,6 +36,8 @@ export interface GrainSettings {
   continuity: number;
   /** Adds irregular film-like exposure variation, between 0 and 1. */
   flicker: number;
+  /** Adds sparse procedural film dust and spots, between 0 and 1. */
+  dirt: number;
   /** Multiplies the animation speed. */
   speed: number;
   /** Temporal frame rate used by the grain. */

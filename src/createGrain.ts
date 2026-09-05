@@ -1,4 +1,5 @@
 import { grainPresets } from "./presets";
+import { resolveBlendMode } from "./blendMode";
 import { calculateFrameSchedule } from "./frameScheduler";
 import { calculateFlickerExposure } from "./flicker";
 import type {
@@ -12,6 +13,7 @@ import type {
 
 export type {
   GrainAnimationMode,
+  GrainBlendMode,
   GrainInstance,
   GrainMetrics,
   GrainOptions,
@@ -24,6 +26,7 @@ export type {
 const DEFAULT_SETTINGS: Readonly<GrainSettings> = Object.freeze({
   intensity: 0.06,
   color: "#ffffff",
+  blendMode: "normal",
   size: 1,
   animated: true,
   blur: 0,
@@ -31,6 +34,7 @@ const DEFAULT_SETTINGS: Readonly<GrainSettings> = Object.freeze({
   character: 0,
   continuity: 0,
   flicker: 0,
+  dirt: 0,
   speed: 1,
   fps: 24,
   animationMode: "evolve",
@@ -73,6 +77,7 @@ uniform float u_complexity;
 uniform float u_character;
 uniform float u_continuity;
 uniform float u_flickerExposure;
+uniform float u_dirt;
 uniform float u_speed;
 uniform float u_fps;
 uniform float u_animationMode;
@@ -166,6 +171,47 @@ float temporalNoise(
     seedOffset,
     animationTime * temporalRate
   );
+}
+
+// Sparse marks that stay attached to a film frame for a short, irregular time.
+// One large spatial cell can contain at most one mark, which keeps the layer
+// light and prevents it from turning into another continuous noise pattern.
+vec2 filmDirt(vec2 fragmentPosition, float temporalFrame) {
+  vec2 dirtPosition = fragmentPosition / max(120.0 * u_pixelRatio, 1.0);
+  vec2 dirtCell = floor(dirtPosition);
+  vec2 localPosition = fract(dirtPosition);
+
+  float cellRandom = hash(dirtCell + vec2(19.0, 61.0));
+  float lifetime = floor(mix(2.0, 7.0, cellRandom));
+  float dirtFrame = floor(temporalFrame * u_speed / lifetime);
+  vec2 eventSeed = dirtCell + dirtFrame * vec2(43.0, 79.0);
+  float eventRandom = hash(eventSeed);
+  float shapeRandom = hash(eventSeed + vec2(31.0, 97.0));
+
+  float threshold = mix(0.997, 0.88, u_dirt);
+  float presence = step(threshold, eventRandom);
+  vec2 center = 0.12 + 0.76 * fract(
+    vec2(shapeRandom * 17.17, shapeRandom * 43.71)
+  );
+  vec2 offset = localPosition - center;
+
+  float radiusRandom = fract(shapeRandom * 71.53);
+  float radius = mix(0.014, 0.052, radiusRandom * radiusRandom);
+  float aspect = mix(0.68, 1.42, fract(shapeRandom * 29.41));
+  vec2 warpedOffset = vec2(offset.x * aspect, offset.y);
+  warpedOffset += vec2(offset.y * offset.y, offset.x * offset.x)
+    * (fract(vec2(shapeRandom * 11.3, shapeRandom * 23.9)) - 0.5)
+    * 3.2;
+
+  float distanceToMark = length(warpedOffset) - radius;
+  float antialiasWidth = max(fwidth(distanceToMark), 0.001);
+  float mark = presence
+    * (1.0 - smoothstep(-antialiasWidth, antialiasWidth, distanceToMark));
+  float opacityVariation = mix(0.58, 1.0, fract(shapeRandom * 53.27));
+  float dirtAlpha = mark * mix(0.12, 0.65, u_dirt) * opacityVariation;
+  float lightMark = step(0.9, fract(shapeRandom * 37.19));
+
+  return vec2(dirtAlpha, lightMark);
 }
 
 void main() {
@@ -272,6 +318,16 @@ void main() {
   float combinedAlpha = grainAlpha + flickerAlpha * (1.0 - grainAlpha);
   vec3 combinedColor = grainColor * grainAlpha
     + flickerColor * flickerAlpha * (1.0 - grainAlpha);
+
+  // Dirt sits above flicker and grain. Most marks are black; a small minority
+  // are white, like dust and damage catching light in a film copy.
+  if (u_dirt > 0.001) {
+    vec2 dirt = filmDirt(gl_FragCoord.xy, temporalFrame);
+    vec3 dirtColor = vec3(dirt.y);
+    combinedColor = dirtColor * dirt.x + combinedColor * (1.0 - dirt.x);
+    combinedAlpha = dirt.x + combinedAlpha * (1.0 - dirt.x);
+  }
+
   outColor = vec4(combinedColor, combinedAlpha);
 }
 `;
@@ -400,6 +456,7 @@ interface RendererResources {
     character: WebGLUniformLocation;
     continuity: WebGLUniformLocation;
     flickerExposure: WebGLUniformLocation;
+    dirt: WebGLUniformLocation;
     speed: WebGLUniformLocation;
     fps: WebGLUniformLocation;
     animationMode: WebGLUniformLocation;
@@ -445,6 +502,7 @@ function createRendererResources(
         character: getUniform(gl, program, "u_character"),
         continuity: getUniform(gl, program, "u_continuity"),
         flickerExposure: getUniform(gl, program, "u_flickerExposure"),
+        dirt: getUniform(gl, program, "u_dirt"),
         speed: getUniform(gl, program, "u_speed"),
         fps: getUniform(gl, program, "u_fps"),
         animationMode: getUniform(gl, program, "u_animationMode"),
@@ -507,6 +565,9 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     color: normalizeHexColor(
       options.color ?? preset?.color ?? DEFAULT_SETTINGS.color,
     ),
+    blendMode: resolveBlendMode(
+      options.blendMode ?? preset?.blendMode ?? DEFAULT_SETTINGS.blendMode,
+    ),
     size: Math.max(options.size ?? preset?.size ?? DEFAULT_SETTINGS.size, 0.1),
     animated: options.animated ?? preset?.animated ?? DEFAULT_SETTINGS.animated,
     blur: clamp(options.blur ?? preset?.blur ?? DEFAULT_SETTINGS.blur, 0, 1),
@@ -527,6 +588,11 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     ),
     flicker: clamp(
       options.flicker ?? preset?.flicker ?? DEFAULT_SETTINGS.flicker,
+      0,
+      1,
+    ),
+    dirt: clamp(
+      options.dirt ?? preset?.dirt ?? DEFAULT_SETTINGS.dirt,
       0,
       1,
     ),
@@ -553,6 +619,7 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     height: "100%",
     pointerEvents: "none",
     zIndex: isFullscreenTarget ? "2147483647" : "1",
+    mixBlendMode: settings.blendMode,
   });
 
   const gl = canvas.getContext("webgl2", {
@@ -782,6 +849,7 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     gl.uniform1f(uniforms.complexity, getEffectiveComplexity());
     gl.uniform1f(uniforms.character, settings.character);
     gl.uniform1f(uniforms.continuity, settings.continuity);
+    gl.uniform1f(uniforms.dirt, settings.dirt);
     gl.uniform1f(
       uniforms.flickerExposure,
       shouldAnimate()
@@ -961,6 +1029,11 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
         colorComponents = hexToRgb(settings.color);
       }
 
+      if (resolvedOptions.blendMode !== undefined) {
+        settings.blendMode = resolveBlendMode(resolvedOptions.blendMode);
+        canvas.style.mixBlendMode = settings.blendMode;
+      }
+
       if (resolvedOptions.size !== undefined) {
         settings.size = Math.max(resolvedOptions.size, 0.1);
       }
@@ -987,6 +1060,10 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
 
       if (resolvedOptions.flicker !== undefined) {
         settings.flicker = clamp(resolvedOptions.flicker, 0, 1);
+      }
+
+      if (resolvedOptions.dirt !== undefined) {
+        settings.dirt = clamp(resolvedOptions.dirt, 0, 1);
       }
 
       if (resolvedOptions.speed !== undefined) {
