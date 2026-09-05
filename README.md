@@ -1,6 +1,6 @@
 # Pardigon
 
-#### Current version: v0.4.0
+#### Current version: v0.5.0
 
 Procedural cinematic grain for the web.
 
@@ -33,6 +33,7 @@ Cross built the landscape from separate touches of colour that come together in 
 - Fullscreen or local element overlays
 - Film-like evolution and flowing noise
 - Adjustable grain character and clustering
+- Subtle film-style exposure flicker
 - Independent animation speed and frame rate
 - Live updates without restarting the renderer
 - Automatic quality based on frame stability
@@ -106,6 +107,7 @@ createGrain({
   complexity: 0.42,
   character: 0.7,
   continuity: 0.8,
+  flicker: 0.25,
   animated: true,
   speed: 1.2,
   fps: 60,
@@ -122,6 +124,12 @@ createGrain({
 
 `continuity` controls how strongly one grain state is connected to the next. `0` keeps the original cut-like animation. Higher values create a smoother transformation. In `flow` mode, it adds shape evolution to the existing spatial movement.
 
+## Film flicker
+
+`flicker` adds small irregular changes in apparent exposure. The signal combines slow brightness drift, lighter frame-level instability and occasional short jumps. `0` disables it and `1` is the strongest available setting.
+
+The maximum black or white overlay remains limited to `9%` opacity. Pardigon calculates one temporal value per rendered frame on the CPU, then the GPU composites it across the target together with the grain. This avoids extra per-pixel noise work. Flicker stops with animation and respects reduced-motion settings.
+
 ## Control the effect
 
 Update it, pause it, restart it, or remove it:
@@ -129,6 +137,7 @@ Update it, pause it, restart it, or remove it:
 ```ts
 grain.update({ intensity: 0.08, size: 4, complexity: 0.6, character: 0.7 });
 grain.update({ continuity: 0.8 });
+grain.update({ flicker: 0.25 });
 grain.update({ color: "#4b8dff" });
 grain.update({ preset: "fog", intensity: 0.05 });
 grain.update({ quality: "auto" });
@@ -178,6 +187,7 @@ This measures Pardigon's draw call, not the device's total GPU usage. The [live 
 | `complexity` | Adds medium and fine detail, from `0` to `1` | `0.35` |
 | `character` | Changes the grain from evenly distributed to clustered, from `0` to `1` | `0` |
 | `continuity` | Links successive grain states, from `0` to `1` | `0` |
+| `flicker` | Adds irregular exposure variation, from `0` to `1` | `0` |
 | `animated` | Animates or freezes the grain | `true` |
 | `speed` | Animation speed multiplier | `1` |
 | `fps` | Temporal frame rate, from `1` to `60` | `24` |
@@ -242,7 +252,8 @@ Pardigon will stay focused on procedural grain, texture and atmosphere. These ar
 - [x] More temporal control
 - [x] Grain character
 - [ ] Film dirt and impurities
-- [ ] Film flicker
+- [x] Film flicker
+- [ ] Blend modes
 - [ ] Later explorations
 
 A section will be checked when its work is complete and available in the public API.
@@ -264,7 +275,7 @@ The cadence scheduler keeps its remaining time between display refreshes, so tar
 
 The `quality: "auto"` option adjusts internal resolution, the optional detail layer and rendering rate when frame stability drops.
 
-Adjustments are gradual. Intensity, colour, size, character and motion keep their selected values while Pardigon reduces its rendering cost. `quality: "fixed"` keeps the full-quality level at all times.
+Adjustments are gradual. Intensity, colour, size, character, continuity, flicker and motion keep their selected values while Pardigon reduces its rendering cost. `quality: "fixed"` keeps the full-quality level at all times.
 
 ### 3. Masks and local regions
 
@@ -323,9 +334,23 @@ The effect should remain procedural, with no texture assets or additional CPU pi
 
 ### 7. Film flicker
 
-A `flicker` control could recreate the small exposure changes found in older film. The brightness would drift slightly, with occasional irregular jumps instead of a clean repeating pulse.
+A `flicker` control now recreates small exposure changes associated with older film. The brightness drifts slightly, with occasional irregular jumps instead of a clean repeating pulse.
 
-The first version should use one simple amount control. Its temporal signal should combine slow variation with sparse, sharper changes, while avoiding distracting flashes. The effect can remain procedural in the existing shader and should add very little rendering cost.
+The first implementation uses one amount control. Its temporal signal combines slow variation, frame-level instability and sparse sharper changes. The result is capped at a subtle opacity, stops with animation and respects reduced-motion preferences.
+
+All presets currently use `flicker: 0` so their values can be chosen through visual testing.
+
+### 8. Blend modes
+
+A future `blendMode` option could integrate the complete Pardigon layer with its backdrop through the browser compositor. The first selection would stay focused:
+
+- `normal` for the current balanced result
+- `soft-light` for a softer integration
+- `overlay` for stronger contrast
+- `multiply` for darker texture
+- `screen` for lighter texture
+
+`normal` would remain the default and the fallback when a requested mode is unavailable. Because CSS blending depends on stacking contexts and can add composition cost outside the WebGL draw itself, this feature will need focused tests on fullscreen layouts, Safari iOS and Android.
 
 ### Later explorations
 

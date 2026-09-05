@@ -1,5 +1,6 @@
 import { grainPresets } from "./presets";
 import { calculateFrameSchedule } from "./frameScheduler";
+import { calculateFlickerExposure } from "./flicker";
 import type {
   GrainInstance,
   GrainMetrics,
@@ -29,6 +30,7 @@ const DEFAULT_SETTINGS: Readonly<GrainSettings> = Object.freeze({
   complexity: 0.35,
   character: 0,
   continuity: 0,
+  flicker: 0,
   speed: 1,
   fps: 24,
   animationMode: "evolve",
@@ -70,6 +72,7 @@ uniform float u_blur;
 uniform float u_complexity;
 uniform float u_character;
 uniform float u_continuity;
+uniform float u_flickerExposure;
 uniform float u_speed;
 uniform float u_fps;
 uniform float u_animationMode;
@@ -259,9 +262,17 @@ void main() {
   vec3 grainColor = mix(vec3(0.0), u_color, positiveGrain);
   float grainAlpha = abs(centeredNoise) * u_intensity;
 
-  // Le canvas utilise un alpha prémultiplié : RGB doit donc déjà contenir alpha.
-  // Cela conserve le même mélange visuel et évite les aplats opaques sur WebKit/iOS.
-  outColor = vec4(grainColor * grainAlpha, grainAlpha);
+  // Flicker adds a subtle black or white exposure layer below the grain.
+  float flickerAlpha = abs(u_flickerExposure);
+  vec3 flickerColor = u_flickerExposure >= 0.0
+    ? vec3(1.0)
+    : vec3(0.0);
+
+  // Both layers use premultiplied alpha for reliable WebKit/iOS blending.
+  float combinedAlpha = grainAlpha + flickerAlpha * (1.0 - grainAlpha);
+  vec3 combinedColor = grainColor * grainAlpha
+    + flickerColor * flickerAlpha * (1.0 - grainAlpha);
+  outColor = vec4(combinedColor, combinedAlpha);
 }
 `;
 
@@ -388,6 +399,7 @@ interface RendererResources {
     complexity: WebGLUniformLocation;
     character: WebGLUniformLocation;
     continuity: WebGLUniformLocation;
+    flickerExposure: WebGLUniformLocation;
     speed: WebGLUniformLocation;
     fps: WebGLUniformLocation;
     animationMode: WebGLUniformLocation;
@@ -432,6 +444,7 @@ function createRendererResources(
         complexity: getUniform(gl, program, "u_complexity"),
         character: getUniform(gl, program, "u_character"),
         continuity: getUniform(gl, program, "u_continuity"),
+        flickerExposure: getUniform(gl, program, "u_flickerExposure"),
         speed: getUniform(gl, program, "u_speed"),
         fps: getUniform(gl, program, "u_fps"),
         animationMode: getUniform(gl, program, "u_animationMode"),
@@ -509,6 +522,11 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     ),
     continuity: clamp(
       options.continuity ?? preset?.continuity ?? DEFAULT_SETTINGS.continuity,
+      0,
+      1,
+    ),
+    flicker: clamp(
+      options.flicker ?? preset?.flicker ?? DEFAULT_SETTINGS.flicker,
       0,
       1,
     ),
@@ -764,6 +782,17 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     gl.uniform1f(uniforms.complexity, getEffectiveComplexity());
     gl.uniform1f(uniforms.character, settings.character);
     gl.uniform1f(uniforms.continuity, settings.continuity);
+    gl.uniform1f(
+      uniforms.flickerExposure,
+      shouldAnimate()
+        ? calculateFlickerExposure(
+            elapsedTime,
+            settings.flicker,
+            getEffectiveFps(),
+            settings.speed,
+          )
+        : 0,
+    );
     gl.uniform1f(uniforms.speed, settings.speed);
     gl.uniform1f(uniforms.fps, getEffectiveFps());
     gl.uniform1f(uniforms.animationMode, settings.animationMode === "flow" ? 1 : 0);
@@ -956,6 +985,10 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
         settings.continuity = clamp(resolvedOptions.continuity, 0, 1);
       }
 
+      if (resolvedOptions.flicker !== undefined) {
+        settings.flicker = clamp(resolvedOptions.flicker, 0, 1);
+      }
+
       if (resolvedOptions.speed !== undefined) {
         settings.speed = Math.max(resolvedOptions.speed, 0.05);
       }
@@ -1011,6 +1044,7 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
       if (destroyed) return;
       settings.animated = false;
       stopLoop();
+      render();
     },
 
     play(): void {

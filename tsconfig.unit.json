@@ -7,5 +7,5 @@
     "outDir": ".test-dist",
     "rootDir": "src"
   },
-  "include": ["src/frameScheduler.ts"]
+  "include": ["src/frameScheduler.ts", "src/flicker.ts"]
 }

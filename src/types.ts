@@ -26,6 +26,8 @@ export interface GrainSettings {
   character: number;
   /** Links successive noise states, between hard cuts and continuous evolution. */
   continuity: number;
+  /** Adds irregular film-like exposure variation, between 0 and 1. */
+  flicker: number;
   /** Multiplies the animation speed. */
   speed: number;
   /** Temporal frame rate used by the grain. */

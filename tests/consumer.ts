@@ -17,6 +17,7 @@ const options: GrainOptions = {
   color: "#7ac7ff",
   character: 0.65,
   continuity: 0.8,
+  flicker: 0.25,
   quality,
   respectReducedMotion: true,
 };
@@ -27,6 +28,7 @@ if (isWebGL2Supported()) {
   grain.update({ color: "#1683ff" });
   grain.update({ character: 0.4 });
   grain.update({ continuity: 0.75 });
+  grain.update({ flicker: 0.4 });
   grain.update({ quality: "fixed" });
   grain.update({ quality: "auto" });
   grain.update({ respectReducedMotion: false });
