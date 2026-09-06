@@ -30,6 +30,8 @@ const DEFAULT_SETTINGS: Readonly<GrainSettings> = Object.freeze({
   color: "#ffffff",
   blendMode: "normal",
   size: 1,
+  scaleX: 100,
+  scaleY: 100,
   animated: true,
   blur: 0,
   complexity: 0.35,
@@ -72,6 +74,7 @@ precision highp float;
 uniform float u_intensity;
 uniform vec3 u_color;
 uniform float u_size;
+uniform vec2 u_scale;
 uniform float u_pixelRatio;
 uniform float u_time;
 uniform float u_blur;
@@ -221,7 +224,10 @@ vec2 filmDirt(vec2 fragmentPosition, float temporalFrame) {
 void main() {
   // Plusieurs pixels voisins partagent une même zone lorsque u_size augmente.
   float cellSize = max(u_size * u_pixelRatio, 1.0);
-  vec2 grainPosition = gl_FragCoord.xy / cellSize;
+  // 100 / 100 garde les proportions d'origine. Une valeur plus grande étire
+  // les formes sur l'axe concerné, sans ajouter d'échantillon de bruit.
+  vec2 grainScale = max(u_scale / 100.0, vec2(0.01));
+  vec2 grainPosition = gl_FragCoord.xy / (cellSize * grainScale);
 
   // Le temps est postérisé indépendamment du rafraîchissement de l'écran.
   float temporalFrame = floor(u_time * u_fps);
@@ -471,6 +477,7 @@ interface RendererResources {
     intensity: WebGLUniformLocation;
     color: WebGLUniformLocation;
     size: WebGLUniformLocation;
+    scale: WebGLUniformLocation;
     pixelRatio: WebGLUniformLocation;
     time: WebGLUniformLocation;
     blur: WebGLUniformLocation;
@@ -526,6 +533,7 @@ function createRendererResources(
         intensity: getUniform(gl, program, "u_intensity"),
         color: getUniform(gl, program, "u_color"),
         size: getUniform(gl, program, "u_size"),
+        scale: getUniform(gl, program, "u_scale"),
         pixelRatio: getUniform(gl, program, "u_pixelRatio"),
         time: getUniform(gl, program, "u_time"),
         blur: getUniform(gl, program, "u_blur"),
@@ -622,6 +630,14 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
       options.blendMode ?? preset?.blendMode ?? DEFAULT_SETTINGS.blendMode,
     ),
     size: Math.max(options.size ?? preset?.size ?? DEFAULT_SETTINGS.size, 0.1),
+    scaleX: Math.max(
+      options.scaleX ?? preset?.scaleX ?? DEFAULT_SETTINGS.scaleX,
+      1,
+    ),
+    scaleY: Math.max(
+      options.scaleY ?? preset?.scaleY ?? DEFAULT_SETTINGS.scaleY,
+      1,
+    ),
     animated: options.animated ?? preset?.animated ?? DEFAULT_SETTINGS.animated,
     blur: clamp(options.blur ?? preset?.blur ?? DEFAULT_SETTINGS.blur, 0, 1),
     complexity: clamp(
@@ -982,6 +998,7 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     gl.uniform1f(uniforms.intensity, settings.intensity);
     gl.uniform3f(uniforms.color, ...colorComponents);
     gl.uniform1f(uniforms.size, settings.size);
+    gl.uniform2f(uniforms.scale, settings.scaleX, settings.scaleY);
     gl.uniform1f(uniforms.pixelRatio, pixelRatio);
     gl.uniform1f(uniforms.time, elapsedTime);
     gl.uniform1f(uniforms.blur, settings.blur);
@@ -1194,6 +1211,14 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
 
       if (resolvedOptions.size !== undefined) {
         settings.size = Math.max(resolvedOptions.size, 0.1);
+      }
+
+      if (resolvedOptions.scaleX !== undefined) {
+        settings.scaleX = Math.max(resolvedOptions.scaleX, 1);
+      }
+
+      if (resolvedOptions.scaleY !== undefined) {
+        settings.scaleY = Math.max(resolvedOptions.scaleY, 1);
       }
 
       if (resolvedOptions.animated !== undefined) {

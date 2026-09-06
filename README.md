@@ -1,6 +1,6 @@
 # Pardigon
 
-#### Current version: v0.8.0
+#### Current version: v0.9.0
 
 Procedural cinematic grain for the web.
 
@@ -176,6 +176,8 @@ createGrain({
   color: "#ffffff",
   blendMode: "soft-light",
   size: 128,
+  scaleX: 600,
+  scaleY: 20,
   blur: 1,
   complexity: 0.42,
   character: 0.7,
@@ -188,6 +190,8 @@ createGrain({
   animationMode: "flow",
 });
 ```
+
+`scaleX` and `scaleY` change the grain's proportions as percentages. `100 / 100` keeps the original shape. `600 / 20` stretches the grain horizontally and compresses it vertically. This coordinate transform runs inside the existing shader and adds no noise sample or render pass.
 
 ## Animation
 
@@ -280,6 +284,8 @@ const {
 | `color` | Grain tint as `#RGB` or `#RRGGBB` | `#ffffff` |
 | `blendMode` | `normal`, `soft-light`, `overlay`, `multiply` or `screen` | `normal` |
 | `size` | Grain scale in CSS pixels | `1` |
+| `scaleX` | Horizontal grain scale as a percentage | `100` |
+| `scaleY` | Vertical grain scale as a percentage | `100` |
 | `blur` | Softens and connects the noise, from `0` to `1` | `0` |
 | `complexity` | Adds medium and fine detail, from `0` to `1` | `0.35` |
 | `character` | Changes the grain from evenly distributed to clustered, from `0` to `1` | `0` |
@@ -317,6 +323,7 @@ Blend-mode composition happens after the WebGL draw and may not appear in `gpuTi
 - [x] Film dirt and impurities
 - [x] Film flicker
 - [x] Blend modes
+- [x] Independent horizontal and vertical scale
 - [ ] Later explorations
 
 Checked sections are available in the public API.
@@ -392,6 +399,10 @@ Current preset values:
 ### 8. Blend modes
 
 `blendMode` uses the browser compositor to apply `normal`, `soft-light`, `overlay`, `multiply` or `screen` to the complete canvas. `normal` remains the default and fallback, so existing presets keep their original appearance.
+
+### 9. Independent horizontal and vertical scale
+
+`scaleX` and `scaleY` reshape the procedural field independently. Both use `100` as their neutral value, so existing presets keep the same appearance. The transformation changes shader coordinates only and does not add another texture, noise sample or render pass.
 
 ### Later explorations
 

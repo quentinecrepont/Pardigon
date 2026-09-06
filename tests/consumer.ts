@@ -22,6 +22,8 @@ const options: GrainOptions = {
   blendMode,
   mask,
   character: 0.65,
+  scaleX: 600,
+  scaleY: 20,
   continuity: 0.8,
   flicker: 0.25,
   dirt: 0.2,
@@ -37,6 +39,7 @@ if (isWebGL2Supported()) {
   grain.update({ mask: "none" });
   grain.update({ mask: "text" });
   grain.update({ character: 0.4 });
+  grain.update({ scaleX: 180, scaleY: 70 });
   grain.update({ continuity: 0.75 });
   grain.update({ flicker: 0.4 });
   grain.update({ dirt: 0.3 });

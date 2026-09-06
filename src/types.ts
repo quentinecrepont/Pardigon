@@ -25,6 +25,10 @@ export interface GrainSettings {
   blendMode: GrainBlendMode;
   /** Grain cell size in CSS pixels. */
   size: number;
+  /** Horizontal grain scale as a percentage. 100 keeps the original proportions. */
+  scaleX: number;
+  /** Vertical grain scale as a percentage. 100 keeps the original proportions. */
+  scaleY: number;
   /** Animates or freezes the grain. */
   animated: boolean;
   /** Softens noise transitions, between 0 and 1. */
