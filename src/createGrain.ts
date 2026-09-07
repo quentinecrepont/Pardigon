@@ -4,6 +4,10 @@ import { calculateFrameSchedule } from "./frameScheduler";
 import { calculateFlickerExposure } from "./flicker";
 import type {
   GrainInstance,
+  GrainLuminanceFit,
+  GrainLuminanceOptions,
+  GrainLuminanceRange,
+  GrainLuminanceSource,
   GrainMaskMode,
   GrainMetrics,
   GrainOptions,
@@ -16,6 +20,10 @@ export type {
   GrainAnimationMode,
   GrainBlendMode,
   GrainInstance,
+  GrainLuminanceFit,
+  GrainLuminanceOptions,
+  GrainLuminanceRange,
+  GrainLuminanceSource,
   GrainMaskMode,
   GrainMetrics,
   GrainOptions,
@@ -36,6 +44,7 @@ const DEFAULT_SETTINGS: Readonly<GrainSettings> = Object.freeze({
   blur: 0,
   complexity: 0.35,
   character: 0,
+  chromatic: 0,
   continuity: 0,
   flicker: 0,
   dirt: 0,
@@ -73,6 +82,7 @@ precision highp float;
 
 uniform float u_intensity;
 uniform vec3 u_color;
+uniform vec2 u_resolution;
 uniform float u_size;
 uniform vec2 u_scale;
 uniform float u_pixelRatio;
@@ -80,6 +90,7 @@ uniform float u_time;
 uniform float u_blur;
 uniform float u_complexity;
 uniform float u_character;
+uniform float u_chromatic;
 uniform float u_continuity;
 uniform float u_flickerExposure;
 uniform float u_dirt;
@@ -88,6 +99,13 @@ uniform float u_fps;
 uniform float u_animationMode;
 uniform float u_maskEnabled;
 uniform sampler2D u_maskTexture;
+uniform float u_luminanceEnabled;
+uniform float u_luminanceResponse;
+uniform float u_luminanceRange;
+uniform float u_luminanceFit;
+uniform float u_sourceAspect;
+uniform float u_targetAspect;
+uniform sampler2D u_luminanceTexture;
 
 out vec4 outColor;
 
@@ -221,6 +239,49 @@ vec2 filmDirt(vec2 fragmentPosition, float temporalFrame) {
   return vec2(dirtAlpha, lightMark);
 }
 
+vec2 mapLuminanceUv(vec2 uv) {
+  if (u_luminanceFit > 1.5) return uv;
+
+  vec2 mappedUv = uv;
+  if (u_luminanceFit < 0.5) {
+    // Cover: crop the source around its centre, like object-fit: cover.
+    if (u_targetAspect > u_sourceAspect) {
+      mappedUv.y = 0.5 + (uv.y - 0.5) * u_sourceAspect / u_targetAspect;
+    } else {
+      mappedUv.x = 0.5 + (uv.x - 0.5) * u_targetAspect / u_sourceAspect;
+    }
+  } else {
+    // Contain: keep the complete source and ignore the letterboxed area.
+    if (u_targetAspect > u_sourceAspect) {
+      mappedUv.x = 0.5 + (uv.x - 0.5) * u_targetAspect / u_sourceAspect;
+    } else {
+      mappedUv.y = 0.5 + (uv.y - 0.5) * u_sourceAspect / u_targetAspect;
+    }
+  }
+  return mappedUv;
+}
+
+float luminanceResponse() {
+  if (u_luminanceEnabled < 0.5 || u_luminanceResponse < 0.001) return 1.0;
+
+  vec2 uv = gl_FragCoord.xy / u_resolution;
+  uv = mapLuminanceUv(uv);
+  if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) {
+    return 1.0;
+  }
+
+  vec3 sourceColor = texture(u_luminanceTexture, uv).rgb;
+  float luminance = dot(sourceColor, vec3(0.2126, 0.7152, 0.0722));
+  float shadows = 1.0 - smoothstep(0.05, 0.72, luminance);
+  float midtones = 1.0 - smoothstep(0.08, 0.62, abs(luminance - 0.5));
+  float highlights = smoothstep(0.28, 0.95, luminance);
+  float selectedRange = u_luminanceRange < 0.5
+    ? shadows
+    : (u_luminanceRange < 1.5 ? midtones : highlights);
+
+  return mix(1.0, 0.12 + selectedRange * 0.88, u_luminanceResponse);
+}
+
 void main() {
   // Plusieurs pixels voisins partagent une même zone lorsque u_size augmente.
   float cellSize = max(u_size * u_pixelRatio, 1.0);
@@ -296,6 +357,7 @@ void main() {
   // Une carte de densité plus large regroupe le grain sans créer d'aplat coloré.
   // Les valeurs positives et négatives gardent le même équilibre : seule leur
   // présence locale devient plus ou moins forte.
+  float densityMultiplier = 1.0;
   if (u_character > 0.001) {
     vec2 characterPosition = basePosition * 0.28 + vec2(43.0, 79.0);
     vec2 characterSeedScale = baseSeedScale * 0.61;
@@ -309,14 +371,62 @@ void main() {
     );
     float characterEnvelope = smoothstep(0.12, 0.88, characterNoise);
     float localDensity = mix(0.25, 1.75, characterEnvelope);
-    centeredNoise *= mix(1.0, localDensity, u_character);
+    densityMultiplier = mix(1.0, localDensity, u_character);
+    centeredNoise *= densityMultiplier;
     centeredNoise = clamp(centeredNoise, -1.0, 1.0);
   }
 
   // Les valeurs positives déposent la teinte choisie, les négatives du noir.
+  vec3 channelNoise = vec3(centeredNoise);
+  if (u_chromatic > 0.001) {
+    // Red and blue share the main scale and motion, with different states.
+    float redNoise = temporalNoise(
+      basePosition + vec2(0.37, -0.19),
+      baseSeedScale * 1.07,
+      vec2(223.0, 307.0),
+      temporalFrame,
+      animationTime,
+      usesFlow
+    ) * 2.0 - 1.0;
+    float blueNoise = temporalNoise(
+      basePosition + vec2(-0.23, 0.41),
+      baseSeedScale * 0.93,
+      vec2(419.0, 163.0),
+      temporalFrame,
+      animationTime,
+      usesFlow
+    ) * 2.0 - 1.0;
+    redNoise = clamp(redNoise * densityMultiplier, -1.0, 1.0);
+    blueNoise = clamp(blueNoise * densityMultiplier, -1.0, 1.0);
+
+    vec3 separatedNoise = vec3(redNoise, centeredNoise, blueNoise);
+    float separatedLuminance = dot(
+      separatedNoise,
+      vec3(0.2126, 0.7152, 0.0722)
+    );
+    vec3 chromaOnly = separatedNoise - vec3(separatedLuminance);
+    channelNoise = clamp(
+      vec3(centeredNoise) + chromaOnly * u_chromatic,
+      vec3(-1.0),
+      vec3(1.0)
+    );
+  }
+
   float positiveGrain = step(0.0, centeredNoise);
   vec3 grainColor = mix(vec3(0.0), u_color, positiveGrain);
-  float grainAlpha = abs(centeredNoise) * u_intensity;
+  float grainMagnitude = abs(centeredNoise);
+  if (u_chromatic > 0.001) {
+    grainMagnitude = max(
+      abs(channelNoise.r),
+      max(abs(channelNoise.g), abs(channelNoise.b))
+    );
+    grainColor = clamp(
+      vec3(0.5) + 0.5 * channelNoise / max(grainMagnitude, 0.0001),
+      vec3(0.0),
+      vec3(1.0)
+    ) * u_color;
+  }
+  float grainAlpha = grainMagnitude * u_intensity * luminanceResponse();
 
   // Flicker adds a subtle black or white exposure layer below the grain.
   float flickerAlpha = abs(u_flickerExposure);
@@ -406,6 +516,83 @@ function resolveMaskMode(value: GrainMaskMode | undefined): GrainMaskMode {
   throw new Error(`Pardigon: masque inconnu (${String(value)}).`);
 }
 
+interface ResolvedLuminanceOptions {
+  enabled: boolean;
+  source: GrainLuminanceSource | null;
+  response: number;
+  range: GrainLuminanceRange;
+  fit: GrainLuminanceFit;
+}
+
+function isLuminanceSource(value: unknown): value is GrainLuminanceSource {
+  return value instanceof HTMLImageElement
+    || value instanceof HTMLVideoElement
+    || value instanceof HTMLCanvasElement;
+}
+
+function getLuminanceSourceSize(
+  source: GrainLuminanceSource,
+): readonly [number, number] {
+  if (source instanceof HTMLImageElement) {
+    return [source.naturalWidth, source.naturalHeight];
+  }
+  if (source instanceof HTMLVideoElement) {
+    return [source.videoWidth, source.videoHeight];
+  }
+  return [source.width, source.height];
+}
+
+function resolveLuminanceOptions(
+  value: GrainLuminanceOptions | false | undefined,
+  previous?: ResolvedLuminanceOptions,
+): ResolvedLuminanceOptions {
+  if (value === undefined) {
+    if (previous) return previous;
+    return {
+      enabled: false,
+      source: null,
+      response: 0.75,
+      range: "midtones",
+      fit: "cover",
+    };
+  }
+
+  if (value === false) {
+    return {
+      enabled: false,
+      source: previous?.source ?? null,
+      response: previous?.response ?? 0.75,
+      range: previous?.range ?? "midtones",
+      fit: previous?.fit ?? "cover",
+    };
+  }
+
+  const source = value.source ?? previous?.source ?? null;
+  if (!isLuminanceSource(source)) {
+    throw new Error(
+      "Pardigon: luminance.source doit etre une image, une video ou un canvas.",
+    );
+  }
+
+  const range = value.range ?? previous?.range ?? "midtones";
+  if (range !== "shadows" && range !== "midtones" && range !== "highlights") {
+    throw new Error(`Pardigon: plage de luminance inconnue (${String(range)}).`);
+  }
+
+  const fit = value.fit ?? previous?.fit ?? "cover";
+  if (fit !== "cover" && fit !== "contain" && fit !== "stretch") {
+    throw new Error(`Pardigon: ajustement de luminance inconnu (${String(fit)}).`);
+  }
+
+  return {
+    enabled: true,
+    source,
+    response: clamp(value.response ?? previous?.response ?? 0.75, 0, 1),
+    range,
+    fit,
+  };
+}
+
 function compileShader(
   gl: WebGL2RenderingContext,
   type: number,
@@ -473,9 +660,11 @@ interface RendererResources {
   program: WebGLProgram;
   vertexArray: WebGLVertexArrayObject;
   maskTexture: WebGLTexture;
+  luminanceTexture: WebGLTexture;
   uniforms: {
     intensity: WebGLUniformLocation;
     color: WebGLUniformLocation;
+    resolution: WebGLUniformLocation;
     size: WebGLUniformLocation;
     scale: WebGLUniformLocation;
     pixelRatio: WebGLUniformLocation;
@@ -483,6 +672,7 @@ interface RendererResources {
     blur: WebGLUniformLocation;
     complexity: WebGLUniformLocation;
     character: WebGLUniformLocation;
+    chromatic: WebGLUniformLocation;
     continuity: WebGLUniformLocation;
     flickerExposure: WebGLUniformLocation;
     dirt: WebGLUniformLocation;
@@ -491,6 +681,13 @@ interface RendererResources {
     animationMode: WebGLUniformLocation;
     maskEnabled: WebGLUniformLocation;
     maskTexture: WebGLUniformLocation;
+    luminanceEnabled: WebGLUniformLocation;
+    luminanceResponse: WebGLUniformLocation;
+    luminanceRange: WebGLUniformLocation;
+    luminanceFit: WebGLUniformLocation;
+    sourceAspect: WebGLUniformLocation;
+    targetAspect: WebGLUniformLocation;
+    luminanceTexture: WebGLUniformLocation;
   };
 }
 
@@ -507,6 +704,7 @@ function createRendererResources(
   let program: WebGLProgram | null = null;
   let vertexArray: WebGLVertexArrayObject | null = null;
   let maskTexture: WebGLTexture | null = null;
+  let luminanceTexture: WebGLTexture | null = null;
 
   try {
     vertexShader = compileShader(gl, gl.VERTEX_SHADER, VERTEX_SHADER);
@@ -514,6 +712,7 @@ function createRendererResources(
     program = createProgram(gl, vertexShader, fragmentShader);
     vertexArray = gl.createVertexArray();
     maskTexture = gl.createTexture();
+    luminanceTexture = gl.createTexture();
 
     if (!vertexArray) {
       throw new Error("Pardigon: impossible de créer le vertex array WebGL2.");
@@ -523,15 +722,21 @@ function createRendererResources(
       throw new Error("Pardigon: impossible de créer la texture du masque.");
     }
 
+    if (!luminanceTexture) {
+      throw new Error("Pardigon: impossible de creer la texture de luminance.");
+    }
+
     const resources: RendererResources = {
       vertexShader,
       fragmentShader,
       program,
       vertexArray,
       maskTexture,
+      luminanceTexture,
       uniforms: {
         intensity: getUniform(gl, program, "u_intensity"),
         color: getUniform(gl, program, "u_color"),
+        resolution: getUniform(gl, program, "u_resolution"),
         size: getUniform(gl, program, "u_size"),
         scale: getUniform(gl, program, "u_scale"),
         pixelRatio: getUniform(gl, program, "u_pixelRatio"),
@@ -539,6 +744,7 @@ function createRendererResources(
         blur: getUniform(gl, program, "u_blur"),
         complexity: getUniform(gl, program, "u_complexity"),
         character: getUniform(gl, program, "u_character"),
+        chromatic: getUniform(gl, program, "u_chromatic"),
         continuity: getUniform(gl, program, "u_continuity"),
         flickerExposure: getUniform(gl, program, "u_flickerExposure"),
         dirt: getUniform(gl, program, "u_dirt"),
@@ -547,6 +753,13 @@ function createRendererResources(
         animationMode: getUniform(gl, program, "u_animationMode"),
         maskEnabled: getUniform(gl, program, "u_maskEnabled"),
         maskTexture: getUniform(gl, program, "u_maskTexture"),
+        luminanceEnabled: getUniform(gl, program, "u_luminanceEnabled"),
+        luminanceResponse: getUniform(gl, program, "u_luminanceResponse"),
+        luminanceRange: getUniform(gl, program, "u_luminanceRange"),
+        luminanceFit: getUniform(gl, program, "u_luminanceFit"),
+        sourceAspect: getUniform(gl, program, "u_sourceAspect"),
+        targetAspect: getUniform(gl, program, "u_targetAspect"),
+        luminanceTexture: getUniform(gl, program, "u_luminanceTexture"),
       },
     };
 
@@ -570,8 +783,27 @@ function createRendererResources(
       new Uint8Array([255, 255, 255, 255]),
     );
     gl.uniform1i(resources.uniforms.maskTexture, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, luminanceTexture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      gl.RGBA,
+      1,
+      1,
+      0,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      new Uint8Array([128, 128, 128, 255]),
+    );
+    gl.uniform1i(resources.uniforms.luminanceTexture, 1);
     return resources;
   } catch (error) {
+    if (luminanceTexture) gl.deleteTexture(luminanceTexture);
     if (maskTexture) gl.deleteTexture(maskTexture);
     if (vertexArray) gl.deleteVertexArray(vertexArray);
     if (program) gl.deleteProgram(program);
@@ -588,6 +820,7 @@ function deleteRendererResources(
   if (!resources || gl.isContextLost()) return;
   gl.deleteVertexArray(resources.vertexArray);
   gl.deleteTexture(resources.maskTexture);
+  gl.deleteTexture(resources.luminanceTexture);
   gl.deleteProgram(resources.program);
   gl.deleteShader(resources.vertexShader);
   gl.deleteShader(resources.fragmentShader);
@@ -650,6 +883,11 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
       0,
       1,
     ),
+    chromatic: clamp(
+      options.chromatic ?? preset?.chromatic ?? DEFAULT_SETTINGS.chromatic,
+      0,
+      1,
+    ),
     continuity: clamp(
       options.continuity ?? preset?.continuity ?? DEFAULT_SETTINGS.continuity,
       0,
@@ -674,6 +912,7 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
   };
   let colorComponents = hexToRgb(settings.color);
   let maskMode = resolveMaskMode(options.mask);
+  let luminanceOptions = resolveLuminanceOptions(options.luminance);
 
   const isFullscreenTarget = target === document.body || target === document.documentElement;
   const previousTargetPosition = target.style.position;
@@ -740,6 +979,9 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
   let resizeObserver: ResizeObserver | null = null;
   let intersectionObserver: IntersectionObserver | null = null;
   let maskMutationObserver: MutationObserver | null = null;
+  let luminanceTextureReady = false;
+  let luminanceUploadFailed = false;
+  let lastUploadedVideoTime = -1;
   const reducedMotionQuery = typeof window.matchMedia === "function"
     ? window.matchMedia("(prefers-reduced-motion: reduce)")
     : null;
@@ -987,6 +1229,60 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
   };
 
+  const uploadLuminanceTexture = (): boolean => {
+    const currentResources = resources;
+    const source = luminanceOptions.source;
+    if (
+      !currentResources
+      || !luminanceOptions.enabled
+      || !source
+      || gl.isContextLost()
+      || luminanceUploadFailed
+    ) {
+      return false;
+    }
+
+    const [width, height] = getLuminanceSourceSize(source);
+    if (width <= 0 || height <= 0) return false;
+
+    if (source instanceof HTMLImageElement && luminanceTextureReady) return true;
+    if (
+      source instanceof HTMLVideoElement
+      && luminanceTextureReady
+      && source.currentTime === lastUploadedVideoTime
+    ) {
+      return true;
+    }
+
+    try {
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, currentResources.luminanceTexture);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+      gl.texImage2D(
+        gl.TEXTURE_2D,
+        0,
+        gl.RGBA,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        source,
+      );
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      luminanceTextureReady = true;
+      if (source instanceof HTMLVideoElement) {
+        lastUploadedVideoTime = source.currentTime;
+      }
+      return true;
+    } catch (error) {
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      luminanceUploadFailed = true;
+      console.error(
+        "Pardigon: impossible de lire la source de luminance. Verifiez sa politique CORS.",
+        error,
+      );
+      return false;
+    }
+  };
+
   const render = (timestamp = performance.now()): void => {
     const currentResources = resources;
     if (!currentResources || gl.isContextLost()) return;
@@ -997,6 +1293,7 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.uniform1f(uniforms.intensity, settings.intensity);
     gl.uniform3f(uniforms.color, ...colorComponents);
+    gl.uniform2f(uniforms.resolution, canvas.width, canvas.height);
     gl.uniform1f(uniforms.size, settings.size);
     gl.uniform2f(uniforms.scale, settings.scaleX, settings.scaleY);
     gl.uniform1f(uniforms.pixelRatio, pixelRatio);
@@ -1004,6 +1301,7 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     gl.uniform1f(uniforms.blur, settings.blur);
     gl.uniform1f(uniforms.complexity, getEffectiveComplexity());
     gl.uniform1f(uniforms.character, settings.character);
+    gl.uniform1f(uniforms.chromatic, settings.chromatic);
     gl.uniform1f(uniforms.continuity, settings.continuity);
     gl.uniform1f(uniforms.dirt, settings.dirt);
     gl.uniform1f(
@@ -1021,14 +1319,95 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     gl.uniform1f(uniforms.fps, getEffectiveFps());
     gl.uniform1f(uniforms.animationMode, settings.animationMode === "flow" ? 1 : 0);
     gl.uniform1f(uniforms.maskEnabled, maskMode === "text" ? 1 : 0);
+    const luminanceReady = uploadLuminanceTexture();
+    const luminanceSource = luminanceOptions.source;
+    const [sourceWidth, sourceHeight] = luminanceSource
+      ? getLuminanceSourceSize(luminanceSource)
+      : [1, 1];
+    const luminanceRange = luminanceOptions.range === "shadows"
+      ? 0
+      : luminanceOptions.range === "midtones"
+        ? 1
+        : 2;
+    const luminanceFit = luminanceOptions.fit === "cover"
+      ? 0
+      : luminanceOptions.fit === "contain"
+        ? 1
+        : 2;
+    gl.uniform1f(
+      uniforms.luminanceEnabled,
+      luminanceOptions.enabled && luminanceReady ? 1 : 0,
+    );
+    gl.uniform1f(uniforms.luminanceResponse, luminanceOptions.response);
+    gl.uniform1f(uniforms.luminanceRange, luminanceRange);
+    gl.uniform1f(uniforms.luminanceFit, luminanceFit);
+    gl.uniform1f(uniforms.sourceAspect, sourceWidth / Math.max(sourceHeight, 1));
+    gl.uniform1f(uniforms.targetAspect, canvas.width / Math.max(canvas.height, 1));
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, currentResources.maskTexture);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, currentResources.luminanceTexture);
     const gpuQuery = startGpuTimer();
     try {
       gl.drawArrays(gl.TRIANGLES, 0, 3);
       recordRenderedFrame(timestamp);
     } finally {
       finishGpuTimer(gpuQuery);
+    }
+  };
+
+  const handleLuminanceSourceUpdate = (): void => {
+    if (destroyed || !luminanceOptions.enabled) return;
+    luminanceTextureReady = false;
+    lastUploadedVideoTime = -1;
+    render();
+  };
+
+  const removeLuminanceSourceListeners = (
+    source: GrainLuminanceSource | null,
+  ): void => {
+    if (source instanceof HTMLImageElement) {
+      source.removeEventListener("load", handleLuminanceSourceUpdate);
+    } else if (source instanceof HTMLVideoElement) {
+      source.removeEventListener("loadeddata", handleLuminanceSourceUpdate);
+      source.removeEventListener("seeked", handleLuminanceSourceUpdate);
+      source.removeEventListener("timeupdate", handleLuminanceSourceUpdate);
+    }
+  };
+
+  const addLuminanceSourceListeners = (
+    source: GrainLuminanceSource | null,
+  ): void => {
+    if (source instanceof HTMLImageElement) {
+      source.addEventListener("load", handleLuminanceSourceUpdate);
+    } else if (source instanceof HTMLVideoElement) {
+      source.addEventListener("loadeddata", handleLuminanceSourceUpdate);
+      source.addEventListener("seeked", handleLuminanceSourceUpdate);
+      source.addEventListener("timeupdate", handleLuminanceSourceUpdate);
+    }
+  };
+
+  const updateLuminanceOptions = (
+    nextValue: GrainLuminanceOptions | false,
+  ): void => {
+    const previousSource = luminanceOptions.source;
+    const wasEnabled = luminanceOptions.enabled;
+    const nextLuminanceOptions = resolveLuminanceOptions(
+      nextValue,
+      luminanceOptions,
+    );
+    const sourceChanged = previousSource !== nextLuminanceOptions.source;
+    if (sourceChanged) {
+      removeLuminanceSourceListeners(previousSource);
+    }
+    luminanceOptions = nextLuminanceOptions;
+    if (sourceChanged || !wasEnabled && luminanceOptions.enabled) {
+      luminanceTextureReady = false;
+      luminanceUploadFailed = false;
+      lastUploadedVideoTime = -1;
+    }
+    if (sourceChanged) {
+      addLuminanceSourceListeners(luminanceOptions.source);
     }
   };
 
@@ -1141,6 +1520,9 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
 
     try {
       resources = createRendererResources(gl);
+      luminanceTextureReady = false;
+      luminanceUploadFailed = false;
+      lastUploadedVideoTime = -1;
       gpuTimerExtension = getGpuTimerExtension();
       lastGpuSampleTimestamp = -Infinity;
       resize();
@@ -1156,6 +1538,7 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
   reducedMotionQuery?.addEventListener("change", handleReducedMotionChange);
   canvas.addEventListener("webglcontextlost", handleContextLost);
   canvas.addEventListener("webglcontextrestored", handleContextRestored);
+  addLuminanceSourceListeners(luminanceOptions.source);
   if (!isFullscreenTarget && "ResizeObserver" in window) {
     resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(target);
@@ -1237,6 +1620,10 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
         settings.character = clamp(resolvedOptions.character, 0, 1);
       }
 
+      if (resolvedOptions.chromatic !== undefined) {
+        settings.chromatic = clamp(resolvedOptions.chromatic, 0, 1);
+      }
+
       if (resolvedOptions.continuity !== undefined) {
         settings.continuity = clamp(resolvedOptions.continuity, 0, 1);
       }
@@ -1269,6 +1656,10 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
       if (resolvedOptions.mask !== undefined) {
         maskMode = resolveMaskMode(resolvedOptions.mask);
         updateMaskTexture();
+      }
+
+      if (resolvedOptions.luminance !== undefined) {
+        updateLuminanceOptions(resolvedOptions.luminance);
       }
 
       let qualityChanged = false;
@@ -1330,6 +1721,7 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
       resizeObserver?.disconnect();
       intersectionObserver?.disconnect();
       maskMutationObserver?.disconnect();
+      removeLuminanceSourceListeners(luminanceOptions.source);
       if (pendingGpuQuery && !gl.isContextLost()) {
         gl.deleteQuery(pendingGpuQuery);
       }

@@ -32,6 +32,8 @@ test("keeps built-in presets immutable", () => {
   assert.equal(grainPresets.paper.character, 0.12);
   assert.equal(grainPresets.pixel.character, 0);
   assert.equal(grainPresets.fog.character, 0.63);
+  assert.equal(grainPresets["8mm"].chromatic, 0);
+  assert.equal(grainPresets.fog.chromatic, 0);
   assert.equal(grainPresets["8mm"].scaleX, 100);
   assert.equal(grainPresets["8mm"].scaleY, 100);
   assert.equal(grainPresets.fog.scaleX, 100);

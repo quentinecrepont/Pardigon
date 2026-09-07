@@ -7,6 +7,23 @@ export type GrainBlendMode =
   | "screen";
 export type GrainQualityMode = "fixed" | "auto";
 export type GrainMaskMode = "none" | "text";
+export type GrainLuminanceRange = "shadows" | "midtones" | "highlights";
+export type GrainLuminanceFit = "cover" | "contain" | "stretch";
+export type GrainLuminanceSource =
+  | HTMLImageElement
+  | HTMLVideoElement
+  | HTMLCanvasElement;
+
+export interface GrainLuminanceOptions {
+  /** Image, video or canvas sampled by the shader. */
+  source?: GrainLuminanceSource;
+  /** Strength of the luminance response, between 0 and 1. */
+  response?: number;
+  /** Tonal range that receives the strongest grain. */
+  range?: GrainLuminanceRange;
+  /** How the source texture maps into the target. */
+  fit?: GrainLuminanceFit;
+}
 
 export type GrainPresetName =
   | "8mm"
@@ -37,6 +54,8 @@ export interface GrainSettings {
   complexity: number;
   /** Controls the spatial clustering of the grain, between 0 and 1. */
   character: number;
+  /** Separates the red and blue grain channels, between 0 and 1. */
+  chromatic: number;
   /** Links successive noise states, between hard cuts and continuous evolution. */
   continuity: number;
   /** Adds irregular film-like exposure variation, between 0 and 1. */
@@ -62,6 +81,8 @@ export interface GrainOptions extends Partial<GrainSettings> {
   quality?: GrainQualityMode;
   /** Limits the grain to the target's text glyphs. Defaults to none. */
   mask?: GrainMaskMode;
+  /** Makes grain density react to a supplied image, video or canvas. */
+  luminance?: GrainLuminanceOptions | false;
 }
 
 export interface GrainUpdateOptions extends Partial<GrainSettings> {
@@ -73,6 +94,8 @@ export interface GrainUpdateOptions extends Partial<GrainSettings> {
   quality?: GrainQualityMode;
   /** Limits the grain to the target's text glyphs. */
   mask?: GrainMaskMode;
+  /** Enables, updates or disables luminance-dependent grain. */
+  luminance?: GrainLuminanceOptions | false;
 }
 
 export interface GrainMetrics {

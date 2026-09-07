@@ -3,6 +3,8 @@ import {
   grainPresets,
   isWebGL2Supported,
   type GrainInstance,
+  type GrainLuminanceFit,
+  type GrainLuminanceRange,
   type GrainMaskMode,
   type GrainBlendMode,
   type GrainOptions,
@@ -14,6 +16,9 @@ const preset: GrainPresetName = "8mm";
 const quality: GrainQualityMode = "auto";
 const blendMode: GrainBlendMode = "soft-light";
 const mask: GrainMaskMode = "text";
+const luminanceRange: GrainLuminanceRange = "midtones";
+const luminanceFit: GrainLuminanceFit = "cover";
+const luminanceSource = document.createElement("img");
 const options: GrainOptions = {
   target: document.body,
   preset,
@@ -21,7 +26,14 @@ const options: GrainOptions = {
   color: "#7ac7ff",
   blendMode,
   mask,
+  luminance: {
+    source: luminanceSource,
+    response: 0.75,
+    range: luminanceRange,
+    fit: luminanceFit,
+  },
   character: 0.65,
+  chromatic: 0.12,
   scaleX: 600,
   scaleY: 20,
   continuity: 0.8,
@@ -38,7 +50,10 @@ if (isWebGL2Supported()) {
   grain.update({ blendMode: "overlay" });
   grain.update({ mask: "none" });
   grain.update({ mask: "text" });
+  grain.update({ luminance: { response: 1, range: "highlights" } });
+  grain.update({ luminance: false });
   grain.update({ character: 0.4 });
+  grain.update({ chromatic: 0.2 });
   grain.update({ scaleX: 180, scaleY: 70 });
   grain.update({ continuity: 0.75 });
   grain.update({ flicker: 0.4 });
