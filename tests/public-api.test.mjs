@@ -51,5 +51,5 @@ test("keeps built-in presets immutable", () => {
 
 test("fails safely outside a browser", () => {
   assert.equal(isWebGL2Supported(), false);
-  assert.throws(() => createGrain(), /navigateur/);
+  assert.throws(() => createGrain(), /requires a browser/);
 });

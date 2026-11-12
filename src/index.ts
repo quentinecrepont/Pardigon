@@ -1,5 +1,5 @@
-export { createGrain, isWebGL2Supported } from "./createGrain";
-export { grainPresets } from "./presets";
+export { createGrain, isWebGL2Supported } from "./createGrain.js";
+export { grainPresets } from "./presets.js";
 export type {
   GrainAnimationMode,
   GrainBlendMode,
@@ -15,4 +15,4 @@ export type {
   GrainQualityMode,
   GrainSettings,
   GrainUpdateOptions,
-} from "./types";
+} from "./types.js";

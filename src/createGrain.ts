@@ -1,57 +1,38 @@
-import { grainPresets } from "./presets";
-import { resolveBlendMode } from "./blendMode";
-import { calculateFrameSchedule } from "./frameScheduler";
-import { calculateFlickerExposure } from "./flicker";
+import {
+  INITIAL_ADAPTIVE_QUALITY,
+  evaluateQualitySample,
+  interruptQualitySampling,
+  percentile,
+} from "./adaptiveQuality.js";
+import { calculateFlickerExposure } from "./flicker.js";
+import { calculateFrameSchedule } from "./frameScheduler.js";
+import {
+  DEFAULT_SETTINGS,
+  clamp,
+  requireBoolean,
+  requireFiniteNumber,
+  resolveMaskMode,
+  resolvePreset,
+  resolveQualityMode,
+  resolveSettings,
+} from "./settings.js";
+import { FRAGMENT_SHADER, VERTEX_SHADER } from "./shaders.js";
+import {
+  buildCanvasFont,
+  resolveAnchorX,
+  resolveFontStretch,
+  resolveTextAlign,
+} from "./textMask.js";
 import type {
   GrainInstance,
   GrainLuminanceFit,
   GrainLuminanceOptions,
   GrainLuminanceRange,
   GrainLuminanceSource,
-  GrainMaskMode,
   GrainMetrics,
   GrainOptions,
-  GrainPresetName,
   GrainQualityMode,
-  GrainSettings,
-} from "./types";
-
-export type {
-  GrainAnimationMode,
-  GrainBlendMode,
-  GrainInstance,
-  GrainLuminanceFit,
-  GrainLuminanceOptions,
-  GrainLuminanceRange,
-  GrainLuminanceSource,
-  GrainMaskMode,
-  GrainMetrics,
-  GrainOptions,
-  GrainPresetName,
-  GrainQualityMode,
-  GrainSettings,
-  GrainUpdateOptions,
-} from "./types";
-
-const DEFAULT_SETTINGS: Readonly<GrainSettings> = Object.freeze({
-  intensity: 0.06,
-  color: "#ffffff",
-  blendMode: "normal",
-  size: 1,
-  scaleX: 100,
-  scaleY: 100,
-  animated: true,
-  blur: 0,
-  complexity: 0.35,
-  character: 0,
-  chromatic: 0,
-  continuity: 0,
-  flicker: 0,
-  dirt: 0,
-  speed: 1,
-  fps: 24,
-  animationMode: "evolve",
-});
+} from "./types.js";
 
 const AUTO_QUALITY_LEVELS = [
   { renderScale: 1, complexityScale: 1, fpsScale: 1 },
@@ -61,431 +42,20 @@ const AUTO_QUALITY_LEVELS = [
 ] as const;
 
 const AUTO_QUALITY_SAMPLE_DURATION_MS = 1_000;
-const AUTO_QUALITY_SLOW_FRAME_MS = 24;
-const AUTO_QUALITY_POOR_SAMPLE_COUNT = 2;
-const AUTO_QUALITY_STABLE_SAMPLE_COUNT = 5;
 const PERFORMANCE_SAMPLE_DURATION_MS = 1_000;
+const MOBILE_BREAKPOINT_PX = 768;
 
-const VERTEX_SHADER = `#version 300 es
-void main() {
-  // Un seul grand triangle couvre tout le canvas, sans vertex buffer.
-  vec2 position = vec2(
-    (gl_VertexID == 2) ? 3.0 : -1.0,
-    (gl_VertexID == 1) ? 3.0 : -1.0
-  );
-  gl_Position = vec4(position, 0.0, 1.0);
-}
-`;
-
-const FRAGMENT_SHADER = `#version 300 es
-precision highp float;
-
-uniform float u_intensity;
-uniform vec3 u_color;
-uniform vec2 u_resolution;
-uniform float u_size;
-uniform vec2 u_scale;
-uniform float u_pixelRatio;
-uniform float u_time;
-uniform float u_blur;
-uniform float u_complexity;
-uniform float u_character;
-uniform float u_chromatic;
-uniform float u_continuity;
-uniform float u_flickerExposure;
-uniform float u_dirt;
-uniform float u_speed;
-uniform float u_fps;
-uniform float u_animationMode;
-uniform float u_maskEnabled;
-uniform sampler2D u_maskTexture;
-uniform float u_luminanceEnabled;
-uniform float u_luminanceResponse;
-uniform float u_luminanceRange;
-uniform float u_luminanceFit;
-uniform float u_sourceAspect;
-uniform float u_targetAspect;
-uniform sampler2D u_luminanceTexture;
-
-out vec4 outColor;
-
-// Transforme une position 2D en nombre pseudo-aléatoire entre 0 et 1.
-float hash(vec2 position) {
-  vec3 p = fract(vec3(position.xyx) * 0.1031);
-  p += dot(p, p.yzx + 33.33);
-  return fract((p.x + p.y) * p.z);
+interface PositionedTarget {
+  instances: number;
+  previousPosition: string;
 }
 
-// Bruit continu : quatre cellules sont interpolées au lieu d'être remplacées.
-float valueNoise(vec2 position, vec2 seedOffset) {
-  vec2 cell = floor(position);
-  vec2 fraction = fract(position);
-  vec2 smoothCurve = fraction * fraction * (3.0 - 2.0 * fraction);
-  vec2 crispCurve = smoothstep(vec2(0.44), vec2(0.56), fraction);
-  vec2 curve = mix(crispCurve, smoothCurve, u_blur);
-
-  float topLeft = hash(cell + seedOffset);
-  float topRight = hash(cell + vec2(1.0, 0.0) + seedOffset);
-  float bottomLeft = hash(cell + vec2(0.0, 1.0) + seedOffset);
-  float bottomRight = hash(cell + vec2(1.0, 1.0) + seedOffset);
-  float top = mix(topLeft, topRight, curve.x);
-  float bottom = mix(bottomLeft, bottomRight, curve.x);
-  return mix(top, bottom, curve.y);
-}
-
-// Links neighbouring noise states without storing textures or previous frames.
-float morphNoise(
-  vec2 position,
-  vec2 seedScale,
-  vec2 seedOffset,
-  float animationTime
-) {
-  float currentSlice = floor(animationTime);
-  float transition = fract(animationTime);
-  transition = transition * transition * transition
-    * (transition * (transition * 6.0 - 15.0) + 10.0);
-
-  float currentNoise = valueNoise(
-    position,
-    seedOffset + currentSlice * seedScale
-  );
-  float nextNoise = valueNoise(
-    position,
-    seedOffset + (currentSlice + 1.0) * seedScale
-  );
-  return mix(currentNoise, nextNoise, transition);
-}
-
-float temporalNoise(
-  vec2 position,
-  vec2 seedScale,
-  vec2 seedOffset,
-  float temporalFrame,
-  float animationTime,
-  bool usesFlow
-) {
-  if (usesFlow) {
-    // Flow already preserves its field while moving it. Continuity makes that
-    // field evolve as well, at a rate independent from the display refresh.
-    if (u_continuity < 0.001) {
-      return valueNoise(position, seedOffset);
-    }
-
-    return morphNoise(
-      position,
-      seedScale,
-      seedOffset,
-      animationTime * u_continuity
-    );
-  }
-
-  if (u_continuity < 0.001) {
-    float hardFrame = floor(temporalFrame * u_speed);
-    return valueNoise(
-      position,
-      seedOffset + hardFrame * seedScale
-    );
-  }
-
-  // At 0, the phase advances by roughly one state per grain frame. At 1,
-  // it advances by one smoothly interpolated state per second.
-  float temporalRate = mix(u_fps, 1.0, u_continuity);
-  return morphNoise(
-    position,
-    seedScale,
-    seedOffset,
-    animationTime * temporalRate
-  );
-}
-
-// Sparse marks that stay attached to a film frame for a short, irregular time.
-// One large spatial cell can contain at most one mark, which keeps the layer
-// light and prevents it from turning into another continuous noise pattern.
-vec2 filmDirt(vec2 fragmentPosition, float temporalFrame) {
-  vec2 dirtPosition = fragmentPosition / max(120.0 * u_pixelRatio, 1.0);
-  vec2 dirtCell = floor(dirtPosition);
-  vec2 localPosition = fract(dirtPosition);
-
-  float cellRandom = hash(dirtCell + vec2(19.0, 61.0));
-  float lifetime = floor(mix(2.0, 7.0, cellRandom));
-  float dirtFrame = floor(temporalFrame * u_speed / lifetime);
-  vec2 eventSeed = dirtCell + dirtFrame * vec2(43.0, 79.0);
-  float eventRandom = hash(eventSeed);
-  float shapeRandom = hash(eventSeed + vec2(31.0, 97.0));
-
-  float threshold = mix(0.997, 0.88, u_dirt);
-  float presence = step(threshold, eventRandom);
-  vec2 center = 0.12 + 0.76 * fract(
-    vec2(shapeRandom * 17.17, shapeRandom * 43.71)
-  );
-  vec2 offset = localPosition - center;
-
-  float radiusRandom = fract(shapeRandom * 71.53);
-  float radius = mix(0.014, 0.052, radiusRandom * radiusRandom);
-  float aspect = mix(0.68, 1.42, fract(shapeRandom * 29.41));
-  vec2 warpedOffset = vec2(offset.x * aspect, offset.y);
-  warpedOffset += vec2(offset.y * offset.y, offset.x * offset.x)
-    * (fract(vec2(shapeRandom * 11.3, shapeRandom * 23.9)) - 0.5)
-    * 3.2;
-
-  float distanceToMark = length(warpedOffset) - radius;
-  float antialiasWidth = max(fwidth(distanceToMark), 0.001);
-  float mark = presence
-    * (1.0 - smoothstep(-antialiasWidth, antialiasWidth, distanceToMark));
-  float opacityVariation = mix(0.58, 1.0, fract(shapeRandom * 53.27));
-  float dirtAlpha = mark * mix(0.12, 0.65, u_dirt) * opacityVariation;
-  float lightMark = step(0.9, fract(shapeRandom * 37.19));
-
-  return vec2(dirtAlpha, lightMark);
-}
-
-vec2 mapLuminanceUv(vec2 uv) {
-  if (u_luminanceFit > 1.5) return uv;
-
-  vec2 mappedUv = uv;
-  if (u_luminanceFit < 0.5) {
-    // Cover: crop the source around its centre, like object-fit: cover.
-    if (u_targetAspect > u_sourceAspect) {
-      mappedUv.y = 0.5 + (uv.y - 0.5) * u_sourceAspect / u_targetAspect;
-    } else {
-      mappedUv.x = 0.5 + (uv.x - 0.5) * u_targetAspect / u_sourceAspect;
-    }
-  } else {
-    // Contain: keep the complete source and ignore the letterboxed area.
-    if (u_targetAspect > u_sourceAspect) {
-      mappedUv.x = 0.5 + (uv.x - 0.5) * u_targetAspect / u_sourceAspect;
-    } else {
-      mappedUv.y = 0.5 + (uv.y - 0.5) * u_sourceAspect / u_targetAspect;
-    }
-  }
-  return mappedUv;
-}
-
-float luminanceResponse() {
-  if (u_luminanceEnabled < 0.5 || u_luminanceResponse < 0.001) return 1.0;
-
-  vec2 uv = gl_FragCoord.xy / u_resolution;
-  uv = mapLuminanceUv(uv);
-  if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) {
-    return 1.0;
-  }
-
-  vec3 sourceColor = texture(u_luminanceTexture, uv).rgb;
-  float luminance = dot(sourceColor, vec3(0.2126, 0.7152, 0.0722));
-  float shadows = 1.0 - smoothstep(0.05, 0.72, luminance);
-  float midtones = 1.0 - smoothstep(0.08, 0.62, abs(luminance - 0.5));
-  float highlights = smoothstep(0.28, 0.95, luminance);
-  float selectedRange = u_luminanceRange < 0.5
-    ? shadows
-    : (u_luminanceRange < 1.5 ? midtones : highlights);
-
-  return mix(1.0, 0.12 + selectedRange * 0.88, u_luminanceResponse);
-}
-
-void main() {
-  // Plusieurs pixels voisins partagent une même zone lorsque u_size augmente.
-  float cellSize = max(u_size * u_pixelRatio, 1.0);
-  // 100 / 100 garde les proportions d'origine. Une valeur plus grande étire
-  // les formes sur l'axe concerné, sans ajouter d'échantillon de bruit.
-  vec2 grainScale = max(u_scale / 100.0, vec2(0.01));
-  vec2 grainPosition = gl_FragCoord.xy / (cellSize * grainScale);
-
-  // Le temps est postérisé indépendamment du rafraîchissement de l'écran.
-  float temporalFrame = floor(u_time * u_fps);
-  float sampledTime = temporalFrame / u_fps;
-  float animationTime = sampledTime * u_speed;
-  bool usesFlow = u_animationMode > 0.5;
-
-  vec2 basePosition = grainPosition;
-  vec2 baseSeedScale = vec2(17.0, 29.0);
-
-  if (usesFlow) {
-    // Le champ glisse lentement et ondule sur les deux axes.
-    vec2 baseFlow = vec2(
-      animationTime * 0.42 + sin(animationTime * 0.31) * 0.35,
-      animationTime * 0.17 + cos(animationTime * 0.23) * 0.28
-    );
-    basePosition += baseFlow;
-  }
-
-  float noise = temporalNoise(
-    basePosition,
-    baseSeedScale,
-    vec2(0.0),
-    temporalFrame,
-    animationTime,
-    usesFlow
-  );
-
-  // Une deuxième couche se déplace dans une autre direction.
-  // Le déphasage entre les deux crée une évolution sans régénération brutale.
-  if (u_complexity > 0.001) {
-    vec2 detailPosition = grainPosition * 3.15;
-    vec2 detailSeedScale = baseSeedScale * 1.37;
-
-    if (usesFlow) {
-      vec2 detailFlow = vec2(
-        -animationTime * 0.36 + cos(animationTime * 0.19) * 0.4,
-        animationTime * 0.51 + sin(animationTime * 0.27) * 0.32
-      );
-      detailPosition += detailFlow;
-    }
-
-    float detailNoise = temporalNoise(
-      detailPosition,
-      detailSeedScale,
-      vec2(71.0, 113.0),
-      temporalFrame,
-      animationTime,
-      usesFlow
-    );
-    noise = mix(noise, detailNoise, u_complexity * 0.34);
-
-    // Une transformation ridged ajoute du relief sans nouvel échantillon de bruit.
-    if (u_complexity > 0.65) {
-      float ridgedNoise = 1.0 - abs(detailNoise * 2.0 - 1.0);
-      float ridgeAmount = (u_complexity - 0.65) / 0.35;
-      noise = mix(noise, ridgedNoise, ridgeAmount * 0.12);
-    }
-  }
-
-  // Le mélange de fréquences réduit le contraste : on le restaure légèrement.
-  noise = clamp(0.5 + (noise - 0.5) * (1.0 + u_complexity * 0.35), 0.0, 1.0);
-
-  float centeredNoise = noise * 2.0 - 1.0;
-
-  // Une carte de densité plus large regroupe le grain sans créer d'aplat coloré.
-  // Les valeurs positives et négatives gardent le même équilibre : seule leur
-  // présence locale devient plus ou moins forte.
-  float densityMultiplier = 1.0;
-  if (u_character > 0.001) {
-    vec2 characterPosition = basePosition * 0.28 + vec2(43.0, 79.0);
-    vec2 characterSeedScale = baseSeedScale * 0.61;
-    float characterNoise = temporalNoise(
-      characterPosition,
-      characterSeedScale,
-      vec2(149.0, 211.0),
-      temporalFrame,
-      animationTime,
-      usesFlow
-    );
-    float characterEnvelope = smoothstep(0.12, 0.88, characterNoise);
-    float localDensity = mix(0.25, 1.75, characterEnvelope);
-    densityMultiplier = mix(1.0, localDensity, u_character);
-    centeredNoise *= densityMultiplier;
-    centeredNoise = clamp(centeredNoise, -1.0, 1.0);
-  }
-
-  // Les valeurs positives déposent la teinte choisie, les négatives du noir.
-  vec3 channelNoise = vec3(centeredNoise);
-  if (u_chromatic > 0.001) {
-    // Red and blue share the main scale and motion, with different states.
-    float redNoise = temporalNoise(
-      basePosition + vec2(0.37, -0.19),
-      baseSeedScale * 1.07,
-      vec2(223.0, 307.0),
-      temporalFrame,
-      animationTime,
-      usesFlow
-    ) * 2.0 - 1.0;
-    float blueNoise = temporalNoise(
-      basePosition + vec2(-0.23, 0.41),
-      baseSeedScale * 0.93,
-      vec2(419.0, 163.0),
-      temporalFrame,
-      animationTime,
-      usesFlow
-    ) * 2.0 - 1.0;
-    redNoise = clamp(redNoise * densityMultiplier, -1.0, 1.0);
-    blueNoise = clamp(blueNoise * densityMultiplier, -1.0, 1.0);
-
-    vec3 separatedNoise = vec3(redNoise, centeredNoise, blueNoise);
-    float separatedLuminance = dot(
-      separatedNoise,
-      vec3(0.2126, 0.7152, 0.0722)
-    );
-    vec3 chromaOnly = separatedNoise - vec3(separatedLuminance);
-    channelNoise = clamp(
-      vec3(centeredNoise) + chromaOnly * u_chromatic,
-      vec3(-1.0),
-      vec3(1.0)
-    );
-  }
-
-  float positiveGrain = step(0.0, centeredNoise);
-  vec3 grainColor = mix(vec3(0.0), u_color, positiveGrain);
-  float grainMagnitude = abs(centeredNoise);
-  if (u_chromatic > 0.001) {
-    grainMagnitude = max(
-      abs(channelNoise.r),
-      max(abs(channelNoise.g), abs(channelNoise.b))
-    );
-    grainColor = clamp(
-      vec3(0.5) + 0.5 * channelNoise / max(grainMagnitude, 0.0001),
-      vec3(0.0),
-      vec3(1.0)
-    ) * u_color;
-  }
-  float grainAlpha = grainMagnitude * u_intensity * luminanceResponse();
-
-  // Flicker adds a subtle black or white exposure layer below the grain.
-  float flickerAlpha = abs(u_flickerExposure);
-  vec3 flickerColor = u_flickerExposure >= 0.0
-    ? vec3(1.0)
-    : vec3(0.0);
-
-  // Both layers use premultiplied alpha for reliable WebKit/iOS blending.
-  float combinedAlpha = grainAlpha + flickerAlpha * (1.0 - grainAlpha);
-  vec3 combinedColor = grainColor * grainAlpha
-    + flickerColor * flickerAlpha * (1.0 - grainAlpha);
-
-  // Dirt sits above flicker and grain. Most marks are black; a small minority
-  // are white, like dust and damage catching light in a film copy.
-  if (u_dirt > 0.001) {
-    vec2 dirt = filmDirt(gl_FragCoord.xy, temporalFrame);
-    vec3 dirtColor = vec3(dirt.y);
-    combinedColor = dirtColor * dirt.x + combinedColor * (1.0 - dirt.x);
-    combinedAlpha = dirt.x + combinedAlpha * (1.0 - dirt.x);
-  }
-
-  // A text mask is rasterized only when its layout changes. The GPU samples
-  // that alpha map here, so every animated grain frame stays inside the glyphs.
-  if (u_maskEnabled > 0.5) {
-    vec2 maskSize = vec2(textureSize(u_maskTexture, 0));
-    vec2 maskUv = gl_FragCoord.xy / maskSize;
-    float maskAlpha = texture(u_maskTexture, maskUv).a;
-    combinedColor *= maskAlpha;
-    combinedAlpha *= maskAlpha;
-  }
-
-  outColor = vec4(combinedColor, combinedAlpha);
-}
-`;
-
-const clamp = (value: number, min: number, max: number): number =>
-  Math.min(Math.max(value, min), max);
-
-function percentile(values: readonly number[], ratio: number): number {
-  const sortedValues = [...values].sort((a, b) => a - b);
-  const index = Math.min(
-    sortedValues.length - 1,
-    Math.floor(sortedValues.length * ratio),
-  );
-  return sortedValues[index] ?? 0;
-}
-
-function normalizeHexColor(value: string): string {
-  const match = /^#([\da-f]{3}|[\da-f]{6})$/i.exec(value.trim());
-
-  if (!match?.[1]) {
-    throw new Error(`Pardigon: couleur hexadécimale invalide (${value}).`);
-  }
-
-  const hex = match[1].length === 3
-    ? [...match[1]].map((character) => character.repeat(2)).join("")
-    : match[1];
-  return `#${hex.toLowerCase()}`;
-}
+/**
+ * Local targets whose static position Pardigon replaced with relative. The
+ * entry is shared by every instance on the same element, so destroying one
+ * of them cannot restore the position while another one still needs it.
+ */
+const positionedTargets = new WeakMap<HTMLElement, PositionedTarget>();
 
 function hexToRgb(color: string): readonly [number, number, number] {
   return [
@@ -495,27 +65,6 @@ function hexToRgb(color: string): readonly [number, number, number] {
   ];
 }
 
-function resolvePreset(
-  name: GrainPresetName | undefined,
-): Readonly<GrainSettings> | undefined {
-  if (name === undefined) return undefined;
-
-  const preset = grainPresets[name];
-
-  if (!preset) {
-    throw new Error(`Pardigon: preset inconnu (${String(name)}).`);
-  }
-
-  return preset;
-}
-
-function resolveMaskMode(value: GrainMaskMode | undefined): GrainMaskMode {
-  if (value === undefined || value === "none") return "none";
-  if (value === "text") return "text";
-
-  throw new Error(`Pardigon: masque inconnu (${String(value)}).`);
-}
-
 interface ResolvedLuminanceOptions {
   enabled: boolean;
   source: GrainLuminanceSource | null;
@@ -523,6 +72,15 @@ interface ResolvedLuminanceOptions {
   range: GrainLuminanceRange;
   fit: GrainLuminanceFit;
 }
+
+const DEFAULT_LUMINANCE_OPTIONS: Readonly<ResolvedLuminanceOptions> =
+  Object.freeze({
+    enabled: false,
+    source: null,
+    response: 0.75,
+    range: "midtones",
+    fit: "cover",
+  });
 
 function isLuminanceSource(value: unknown): value is GrainLuminanceSource {
   return value instanceof HTMLImageElement
@@ -546,48 +104,37 @@ function resolveLuminanceOptions(
   value: GrainLuminanceOptions | false | undefined,
   previous?: ResolvedLuminanceOptions,
 ): ResolvedLuminanceOptions {
-  if (value === undefined) {
-    if (previous) return previous;
-    return {
-      enabled: false,
-      source: null,
-      response: 0.75,
-      range: "midtones",
-      fit: "cover",
-    };
-  }
+  const base = previous ?? DEFAULT_LUMINANCE_OPTIONS;
 
-  if (value === false) {
-    return {
-      enabled: false,
-      source: previous?.source ?? null,
-      response: previous?.response ?? 0.75,
-      range: previous?.range ?? "midtones",
-      fit: previous?.fit ?? "cover",
-    };
-  }
+  if (value === undefined) return { ...base };
+  if (value === false) return { ...base, enabled: false };
 
-  const source = value.source ?? previous?.source ?? null;
+  const source = value.source ?? base.source;
   if (!isLuminanceSource(source)) {
     throw new Error(
-      "Pardigon: luminance.source doit etre une image, une video ou un canvas.",
+      "Pardigon: luminance.source must be an image, a video or a canvas.",
     );
   }
 
-  const range = value.range ?? previous?.range ?? "midtones";
+  const range = value.range ?? base.range;
   if (range !== "shadows" && range !== "midtones" && range !== "highlights") {
-    throw new Error(`Pardigon: plage de luminance inconnue (${String(range)}).`);
+    throw new Error(`Pardigon: unknown luminance range (${String(range)}).`);
   }
 
-  const fit = value.fit ?? previous?.fit ?? "cover";
+  const fit = value.fit ?? base.fit;
   if (fit !== "cover" && fit !== "contain" && fit !== "stretch") {
-    throw new Error(`Pardigon: ajustement de luminance inconnu (${String(fit)}).`);
+    throw new Error(`Pardigon: unknown luminance fit (${String(fit)}).`);
   }
+
+  const response = requireFiniteNumber(
+    "luminance.response",
+    value.response ?? base.response,
+  );
 
   return {
     enabled: true,
     source,
-    response: clamp(value.response ?? previous?.response ?? 0.75, 0, 1),
+    response: clamp(response, 0, 1),
     range,
     fit,
   };
@@ -601,16 +148,16 @@ function compileShader(
   const shader = gl.createShader(type);
 
   if (!shader) {
-    throw new Error("Pardigon: impossible de créer un shader WebGL2.");
+    throw new Error("Pardigon: could not create a WebGL2 shader.");
   }
 
   gl.shaderSource(shader, source);
   gl.compileShader(shader);
 
   if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-    const message = gl.getShaderInfoLog(shader) ?? "Erreur GLSL inconnue.";
+    const message = gl.getShaderInfoLog(shader) ?? "Unknown GLSL error.";
     gl.deleteShader(shader);
-    throw new Error(`Pardigon: compilation du shader impossible. ${message}`);
+    throw new Error(`Pardigon: shader compilation failed. ${message}`);
   }
 
   return shader;
@@ -624,7 +171,7 @@ function createProgram(
   const program = gl.createProgram();
 
   if (!program) {
-    throw new Error("Pardigon: impossible de créer le programme WebGL2.");
+    throw new Error("Pardigon: could not create the WebGL2 program.");
   }
 
   gl.attachShader(program, vertexShader);
@@ -632,9 +179,9 @@ function createProgram(
   gl.linkProgram(program);
 
   if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-    const message = gl.getProgramInfoLog(program) ?? "Erreur de liaison inconnue.";
+    const message = gl.getProgramInfoLog(program) ?? "Unknown link error.";
     gl.deleteProgram(program);
-    throw new Error(`Pardigon: liaison du programme impossible. ${message}`);
+    throw new Error(`Pardigon: program linking failed. ${message}`);
   }
 
   return program;
@@ -648,7 +195,7 @@ function getUniform(
   const location = gl.getUniformLocation(program, name);
 
   if (location === null) {
-    throw new Error(`Pardigon: uniform GLSL introuvable (${name}).`);
+    throw new Error(`Pardigon: GLSL uniform not found (${name}).`);
   }
 
   return location;
@@ -715,15 +262,15 @@ function createRendererResources(
     luminanceTexture = gl.createTexture();
 
     if (!vertexArray) {
-      throw new Error("Pardigon: impossible de créer le vertex array WebGL2.");
+      throw new Error("Pardigon: could not create the WebGL2 vertex array.");
     }
 
     if (!maskTexture) {
-      throw new Error("Pardigon: impossible de créer la texture du masque.");
+      throw new Error("Pardigon: could not create the mask texture.");
     }
 
     if (!luminanceTexture) {
-      throw new Error("Pardigon: impossible de creer la texture de luminance.");
+      throw new Error("Pardigon: could not create the luminance texture.");
     }
 
     const resources: RendererResources = {
@@ -826,6 +373,80 @@ function deleteRendererResources(
   gl.deleteShader(resources.fragmentShader);
 }
 
+interface MeasuredTextLine {
+  text: string;
+  left: number;
+  right: number;
+  top: number;
+}
+
+/**
+ * Reads the rendered text of a target and where the browser placed its line,
+ * in the CSS pixels of the grain canvas. Measuring the real layout keeps the
+ * mask aligned with padding, text-indent, flexbox centring and line height.
+ */
+function measureTextLine(
+  target: HTMLElement,
+  canvas: HTMLCanvasElement,
+  cssWidth: number,
+): MeasuredTextLine | null {
+  // innerText applies text-transform and skips hidden content, like the page.
+  const text = target.innerText.replace(/\s+/g, " ").trim();
+  if (!text) return null;
+
+  const canvasRect = canvas.getBoundingClientRect();
+  // CSS transforms scale client rectangles, but not the canvas buffer.
+  const scale = canvasRect.width > 0 && cssWidth > 0
+    ? canvasRect.width / cssWidth
+    : 1;
+  const walker = document.createTreeWalker(target, NodeFilter.SHOW_TEXT);
+  const range = document.createRange();
+  let left = Infinity;
+  let right = -Infinity;
+  let top: number | null = null;
+
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    range.selectNodeContents(node);
+    for (const rect of range.getClientRects()) {
+      if (rect.width <= 0 || rect.height <= 0) continue;
+      left = Math.min(left, rect.left);
+      right = Math.max(right, rect.right);
+      top ??= rect.top;
+    }
+  }
+
+  if (top === null) return null;
+  return {
+    text,
+    left: (left - canvasRect.left) / scale,
+    right: (right - canvasRect.left) / scale,
+    top: (top - canvasRect.top) / scale,
+  };
+}
+
+type CanvasTextStyle = Record<
+  "letterSpacing" | "wordSpacing" | "fontStretch" | "fontVariantCaps",
+  string
+>;
+
+/** Copies the text settings that the canvas font shorthand cannot express. */
+function applyCanvasTextStyle(
+  context: CanvasRenderingContext2D,
+  style: CSSStyleDeclaration,
+): void {
+  // Older browsers lack some of these properties and keep their defaults.
+  // Values the canvas does not accept, such as "normal" spacing, are ignored.
+  const textStyle = context as unknown as CanvasTextStyle;
+  if ("letterSpacing" in textStyle) textStyle.letterSpacing = style.letterSpacing;
+  if ("wordSpacing" in textStyle) textStyle.wordSpacing = style.wordSpacing;
+  if ("fontStretch" in textStyle) {
+    textStyle.fontStretch = resolveFontStretch(style.fontStretch);
+  }
+  if ("fontVariantCaps" in textStyle) {
+    textStyle.fontVariantCaps = style.fontVariantCaps;
+  }
+}
+
 export function isWebGL2Supported(): boolean {
   if (typeof document === "undefined") return false;
 
@@ -840,83 +461,38 @@ export function isWebGL2Supported(): boolean {
 
 export function createGrain(options: GrainOptions = {}): GrainInstance {
   if (typeof document === "undefined") {
-    throw new Error("Pardigon: createGrain() nécessite un navigateur.");
+    throw new Error("Pardigon: createGrain() requires a browser.");
+  }
+
+  // A missing element from querySelector() must not silently become a
+  // fullscreen overlay.
+  if (options.target !== undefined && !(options.target instanceof HTMLElement)) {
+    throw new Error(
+      `Pardigon: target must be an HTMLElement (${String(options.target)}).`,
+    );
   }
 
   const target = options.target ?? document.body;
-  const preset = resolvePreset(options.preset);
 
   if (!target) {
-    throw new Error("Pardigon: aucun élément cible disponible.");
+    throw new Error("Pardigon: no target element is available.");
   }
 
-  const settings: GrainSettings = {
-    intensity: clamp(
-      options.intensity ?? preset?.intensity ?? DEFAULT_SETTINGS.intensity,
-      0,
-      1,
-    ),
-    color: normalizeHexColor(
-      options.color ?? preset?.color ?? DEFAULT_SETTINGS.color,
-    ),
-    blendMode: resolveBlendMode(
-      options.blendMode ?? preset?.blendMode ?? DEFAULT_SETTINGS.blendMode,
-    ),
-    size: Math.max(options.size ?? preset?.size ?? DEFAULT_SETTINGS.size, 0.1),
-    scaleX: Math.max(
-      options.scaleX ?? preset?.scaleX ?? DEFAULT_SETTINGS.scaleX,
-      1,
-    ),
-    scaleY: Math.max(
-      options.scaleY ?? preset?.scaleY ?? DEFAULT_SETTINGS.scaleY,
-      1,
-    ),
-    animated: options.animated ?? preset?.animated ?? DEFAULT_SETTINGS.animated,
-    blur: clamp(options.blur ?? preset?.blur ?? DEFAULT_SETTINGS.blur, 0, 1),
-    complexity: clamp(
-      options.complexity ?? preset?.complexity ?? DEFAULT_SETTINGS.complexity,
-      0,
-      1,
-    ),
-    character: clamp(
-      options.character ?? preset?.character ?? DEFAULT_SETTINGS.character,
-      0,
-      1,
-    ),
-    chromatic: clamp(
-      options.chromatic ?? preset?.chromatic ?? DEFAULT_SETTINGS.chromatic,
-      0,
-      1,
-    ),
-    continuity: clamp(
-      options.continuity ?? preset?.continuity ?? DEFAULT_SETTINGS.continuity,
-      0,
-      1,
-    ),
-    flicker: clamp(
-      options.flicker ?? preset?.flicker ?? DEFAULT_SETTINGS.flicker,
-      0,
-      1,
-    ),
-    dirt: clamp(
-      options.dirt ?? preset?.dirt ?? DEFAULT_SETTINGS.dirt,
-      0,
-      1,
-    ),
-    speed: Math.max(options.speed ?? preset?.speed ?? DEFAULT_SETTINGS.speed, 0.05),
-    fps: clamp(options.fps ?? preset?.fps ?? DEFAULT_SETTINGS.fps, 1, 60),
-    animationMode:
-      options.animationMode
-      ?? preset?.animationMode
-      ?? DEFAULT_SETTINGS.animationMode,
-  };
+  // Every option is validated before the canvas and WebGL context exist.
+  let settings = resolveSettings(
+    options,
+    resolvePreset(options.preset) ?? DEFAULT_SETTINGS,
+  );
   let colorComponents = hexToRgb(settings.color);
   let maskMode = resolveMaskMode(options.mask);
   let luminanceOptions = resolveLuminanceOptions(options.luminance);
+  let qualityMode: GrainQualityMode = resolveQualityMode(options.quality);
+  let respectReducedMotion = requireBoolean(
+    "respectReducedMotion",
+    options.respectReducedMotion ?? true,
+  );
 
   const isFullscreenTarget = target === document.body || target === document.documentElement;
-  const previousTargetPosition = target.style.position;
-  const didSetTargetPosition = !isFullscreenTarget && getComputedStyle(target).position === "static";
 
   const canvas = document.createElement("canvas");
   const maskCanvas = document.createElement("canvas");
@@ -942,13 +518,20 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
   });
 
   if (!gl) {
-    throw new Error("Pardigon: WebGL2 n'est pas disponible dans ce navigateur.");
+    throw new Error("Pardigon: WebGL2 is not available in this browser.");
   }
 
   const getGpuTimerExtension = (): GpuTimerExtension | null =>
     gl.getExtension("EXT_disjoint_timer_query_webgl2") as GpuTimerExtension | null;
 
-  let resources: RendererResources | null = createRendererResources(gl);
+  let resources: RendererResources | null;
+  try {
+    resources = createRendererResources(gl);
+  } catch (error) {
+    // Browsers cap live WebGL contexts, so a failed setup must release its own.
+    gl.getExtension("WEBGL_lose_context")?.loseContext();
+    throw error;
+  }
   let gpuTimerExtension = getGpuTimerExtension();
   let pendingGpuQuery: WebGLQuery | null = null;
   let gpuTimeMs: number | null = null;
@@ -960,14 +543,11 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
   let lastRenderTimestamp: number | null = null;
   let pixelRatio = 1;
   let destroyed = false;
+  let paused = false;
   let targetVisible = true;
-  let respectReducedMotion = options.respectReducedMotion ?? true;
-  let qualityMode: GrainQualityMode = options.quality === "auto" ? "auto" : "fixed";
-  let qualityLevel = 0;
+  let adaptiveQuality = INITIAL_ADAPTIVE_QUALITY;
   let qualitySampleStartedAt: number | null = null;
   let qualityFrameIntervals: number[] = [];
-  let poorQualitySampleCount = 0;
-  let stableQualitySampleCount = 0;
   let renderedFrames = 0;
   let lateFrames = 0;
   let actualFps: number | null = null;
@@ -978,7 +558,8 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
   let previousPerformanceRenderTimestamp: number | null = null;
   let resizeObserver: ResizeObserver | null = null;
   let intersectionObserver: IntersectionObserver | null = null;
-  let maskMutationObserver: MutationObserver | null = null;
+  let contentObserver: MutationObserver | null = null;
+  let pixelRatioQuery: MediaQueryList | null = null;
   let luminanceTextureReady = false;
   let luminanceUploadFailed = false;
   let lastUploadedVideoTime = -1;
@@ -986,15 +567,21 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     ? window.matchMedia("(prefers-reduced-motion: reduce)")
     : null;
 
-  if (didSetTargetPosition) {
+  let positionEntry = positionedTargets.get(target);
+  if (positionEntry) {
+    positionEntry.instances += 1;
+  } else if (!isFullscreenTarget && getComputedStyle(target).position === "static") {
+    positionEntry = { instances: 1, previousPosition: target.style.position };
+    positionedTargets.set(target, positionEntry);
     target.style.position = "relative";
   }
   target.appendChild(canvas);
 
   const getQualityLevel = () =>
-    AUTO_QUALITY_LEVELS[qualityLevel] ?? AUTO_QUALITY_LEVELS[0];
+    AUTO_QUALITY_LEVELS[adaptiveQuality.level] ?? AUTO_QUALITY_LEVELS[0];
 
-  const getDeviceFpsLimit = (): number => window.innerWidth <= 768 ? 24 : 60;
+  const getDeviceFpsLimit = (): number =>
+    window.innerWidth <= MOBILE_BREAKPOINT_PX ? 24 : 60;
 
   const getEffectiveFps = (): number => {
     const requestedFps = Math.min(settings.fps, getDeviceFpsLimit());
@@ -1004,11 +591,13 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
   const getEffectiveComplexity = (): number =>
     settings.complexity * getQualityLevel().complexityScale;
 
-  const resetQualitySamples = (): void => {
+  /** Returns true when an interrupted probe changed the quality level. */
+  const resetQualitySamples = (): boolean => {
+    const previousLevel = adaptiveQuality.level;
     qualitySampleStartedAt = null;
     qualityFrameIntervals = [];
-    poorQualitySampleCount = 0;
-    stableQualitySampleCount = 0;
+    adaptiveQuality = interruptQualitySampling(adaptiveQuality);
+    return adaptiveQuality.level !== previousLevel;
   };
 
   const sampleAdaptiveQuality = (
@@ -1026,40 +615,15 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
       return false;
     }
 
-    const frameTimeP95 = percentile(qualityFrameIntervals, 0.95);
-    const slowFrames = qualityFrameIntervals.filter(
-      (interval) => interval > AUTO_QUALITY_SLOW_FRAME_MS,
-    ).length;
-    const slowFrameRatio = slowFrames / qualityFrameIntervals.length;
-    const isPoor = frameTimeP95 > 28 || slowFrameRatio > 0.18;
-    const isStable = frameTimeP95 < 20 && slowFrameRatio < 0.05;
-
-    poorQualitySampleCount = isPoor ? poorQualitySampleCount + 1 : 0;
-    stableQualitySampleCount = isStable ? stableQualitySampleCount + 1 : 0;
+    const previousLevel = adaptiveQuality.level;
+    adaptiveQuality = evaluateQualitySample(
+      adaptiveQuality,
+      qualityFrameIntervals,
+      AUTO_QUALITY_LEVELS.length - 1,
+    );
     qualitySampleStartedAt = timestamp;
     qualityFrameIntervals = [];
-
-    if (
-      poorQualitySampleCount >= AUTO_QUALITY_POOR_SAMPLE_COUNT
-      && qualityLevel < AUTO_QUALITY_LEVELS.length - 1
-    ) {
-      qualityLevel += 1;
-      poorQualitySampleCount = 0;
-      stableQualitySampleCount = 0;
-      return true;
-    }
-
-    if (
-      stableQualitySampleCount >= AUTO_QUALITY_STABLE_SAMPLE_COUNT
-      && qualityLevel > 0
-    ) {
-      qualityLevel -= 1;
-      poorQualitySampleCount = 0;
-      stableQualitySampleCount = 0;
-      return true;
-    }
-
-    return false;
+    return adaptiveQuality.level !== previousLevel;
   };
 
   const pollGpuTimer = (): void => {
@@ -1137,8 +701,8 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     performanceFrameIntervals = [];
   };
 
-  const resetPerformanceSample = (timestamp = performance.now()): void => {
-    performanceSampleStartedAt = timestamp;
+  const resetPerformanceSample = (): void => {
+    performanceSampleStartedAt = performance.now();
     performanceSampleRenderedFrames = 0;
     performanceFrameIntervals = [];
     previousPerformanceRenderTimestamp = null;
@@ -1152,68 +716,36 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
 
     const context = maskCanvas.getContext("2d");
     if (!context) {
-      throw new Error("Pardigon: impossible de créer le masque texte.");
+      throw new Error("Pardigon: could not create the text mask.");
     }
 
     maskCanvas.width = canvas.width;
     maskCanvas.height = canvas.height;
     context.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
 
-    const style = getComputedStyle(target);
-    const cssWidth = canvas.width / pixelRatio;
-    const cssHeight = canvas.height / pixelRatio;
-    const paddingLeft = Number.parseFloat(style.paddingLeft) || 0;
-    const paddingRight = Number.parseFloat(style.paddingRight) || 0;
-    const paddingTop = Number.parseFloat(style.paddingTop) || 0;
-    const paddingBottom = Number.parseFloat(style.paddingBottom) || 0;
-    const textTransform = style.textTransform;
-    const rawText = target.textContent?.replace(/\s+/g, " ").trim() ?? "";
-    const text = textTransform === "uppercase"
-      ? rawText.toUpperCase()
-      : textTransform === "lowercase"
-        ? rawText.toLowerCase()
-        : rawText;
+    const line = measureTextLine(target, canvas, canvas.width / pixelRatio);
+    if (line) {
+      const style = getComputedStyle(target);
+      const textAlign = resolveTextAlign(style.textAlign, style.direction);
+      context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+      context.fillStyle = "#ffffff";
+      context.textBaseline = "alphabetic";
+      context.textAlign = textAlign;
+      context.direction = style.direction === "rtl" ? "rtl" : "ltr";
+      context.font = buildCanvasFont(style);
+      applyCanvasTextStyle(context, style);
 
-    context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-    context.fillStyle = "#ffffff";
-    context.textBaseline = "alphabetic";
-    context.textAlign = style.textAlign === "center"
-      ? "center"
-      : style.textAlign === "right" || style.textAlign === "end"
-        ? "right"
-        : "left";
-    context.direction = style.direction === "rtl" ? "rtl" : "ltr";
-    context.font = [
-      style.fontStyle,
-      style.fontVariant,
-      style.fontWeight,
-      style.fontSize,
-      style.fontFamily,
-    ].join(" ");
-
-    const spacedContext = context as CanvasRenderingContext2D & {
-      letterSpacing?: string;
-    };
-    if ("letterSpacing" in spacedContext) {
-      spacedContext.letterSpacing = style.letterSpacing;
+      // The measured line box starts at the font ascent above the baseline.
+      const metrics = context.measureText(line.text);
+      const fontAscent = metrics.fontBoundingBoxAscent
+        || metrics.actualBoundingBoxAscent;
+      context.fillText(
+        line.text,
+        resolveAnchorX(textAlign, line.left, line.right),
+        line.top + fontAscent,
+      );
+      context.setTransform(1, 0, 0, 1, 0, 0);
     }
-
-    const x = context.textAlign === "center"
-      ? cssWidth / 2
-      : context.textAlign === "right"
-        ? cssWidth - paddingRight
-        : paddingLeft;
-    const metrics = context.measureText(text);
-    const fontAscent = metrics.fontBoundingBoxAscent
-      || metrics.actualBoundingBoxAscent;
-    const fontDescent = metrics.fontBoundingBoxDescent
-      || metrics.actualBoundingBoxDescent;
-    const contentHeight = cssHeight - paddingTop - paddingBottom;
-    const y = paddingTop
-      + (contentHeight - fontAscent - fontDescent) / 2
-      + fontAscent;
-    context.fillText(text, x, y);
-    context.setTransform(1, 0, 0, 1, 0, 0);
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, currentResources.maskTexture);
@@ -1276,7 +808,7 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
       luminanceUploadFailed = true;
       console.error(
-        "Pardigon: impossible de lire la source de luminance. Verifiez sa politique CORS.",
+        "Pardigon: could not read the luminance source. Check its CORS policy.",
         error,
       );
       return false;
@@ -1360,16 +892,26 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     if (destroyed || !luminanceOptions.enabled) return;
     luminanceTextureReady = false;
     lastUploadedVideoTime = -1;
-    render();
+    // A running loop uploads the new source on its next scheduled grain frame.
+    // Rendering here as well would exceed the selected frame rate.
+    if (animationFrameId === null) render();
+  };
+
+  // New media may come from a different origin, so a previous CORS failure
+  // no longer applies. Seeks and time updates keep the failure to avoid
+  // logging the same error several times per second.
+  const handleLuminanceSourceLoad = (): void => {
+    luminanceUploadFailed = false;
+    handleLuminanceSourceUpdate();
   };
 
   const removeLuminanceSourceListeners = (
     source: GrainLuminanceSource | null,
   ): void => {
     if (source instanceof HTMLImageElement) {
-      source.removeEventListener("load", handleLuminanceSourceUpdate);
+      source.removeEventListener("load", handleLuminanceSourceLoad);
     } else if (source instanceof HTMLVideoElement) {
-      source.removeEventListener("loadeddata", handleLuminanceSourceUpdate);
+      source.removeEventListener("loadeddata", handleLuminanceSourceLoad);
       source.removeEventListener("seeked", handleLuminanceSourceUpdate);
       source.removeEventListener("timeupdate", handleLuminanceSourceUpdate);
     }
@@ -1379,40 +921,30 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     source: GrainLuminanceSource | null,
   ): void => {
     if (source instanceof HTMLImageElement) {
-      source.addEventListener("load", handleLuminanceSourceUpdate);
+      source.addEventListener("load", handleLuminanceSourceLoad);
     } else if (source instanceof HTMLVideoElement) {
-      source.addEventListener("loadeddata", handleLuminanceSourceUpdate);
+      source.addEventListener("loadeddata", handleLuminanceSourceLoad);
       source.addEventListener("seeked", handleLuminanceSourceUpdate);
       source.addEventListener("timeupdate", handleLuminanceSourceUpdate);
     }
   };
 
-  const updateLuminanceOptions = (
-    nextValue: GrainLuminanceOptions | false,
-  ): void => {
-    const previousSource = luminanceOptions.source;
-    const wasEnabled = luminanceOptions.enabled;
-    const nextLuminanceOptions = resolveLuminanceOptions(
-      nextValue,
-      luminanceOptions,
-    );
-    const sourceChanged = previousSource !== nextLuminanceOptions.source;
-    if (sourceChanged) {
-      removeLuminanceSourceListeners(previousSource);
-    }
-    luminanceOptions = nextLuminanceOptions;
-    if (sourceChanged || !wasEnabled && luminanceOptions.enabled) {
+  const setLuminanceOptions = (next: ResolvedLuminanceOptions): void => {
+    const previous = luminanceOptions;
+    const sourceChanged = previous.source !== next.source;
+    if (sourceChanged) removeLuminanceSourceListeners(previous.source);
+    luminanceOptions = next;
+    if (sourceChanged || (!previous.enabled && next.enabled)) {
       luminanceTextureReady = false;
       luminanceUploadFailed = false;
       lastUploadedVideoTime = -1;
     }
-    if (sourceChanged) {
-      addLuminanceSourceListeners(luminanceOptions.source);
-    }
+    if (sourceChanged) addLuminanceSourceListeners(next.source);
   };
 
   const shouldAnimate = (): boolean =>
     settings.animated
+    && !paused
     && !(respectReducedMotion && reducedMotionQuery?.matches === true);
 
   const loop = (timestamp: number): void => {
@@ -1428,7 +960,7 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     }
     previousTimestamp = timestamp;
     const qualityChanged = sampleAdaptiveQuality(timestamp, frameInterval);
-    // La cadence reste fluide ; speed ne ralentit que le mouvement du champ.
+    // The grain cadence stays steady; speed only slows the noise movement.
     const targetFps = getEffectiveFps();
     if (qualityChanged) {
       resize();
@@ -1459,7 +991,7 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
       && !gl.isContextLost()
       && animationFrameId === null
     ) {
-      resetQualitySamples();
+      if (resetQualitySamples()) resize();
       resetPerformanceSample();
       lastRenderTimestamp = null;
       animationFrameId = requestAnimationFrame(loop);
@@ -1471,24 +1003,26 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
       cancelAnimationFrame(animationFrameId);
       animationFrameId = null;
     }
+    // Quality and performance samples are reset by startLoop(), and
+    // getMetrics() reports no FPS while the loop is stopped.
     previousTimestamp = null;
     lastRenderTimestamp = null;
-    qualitySampleStartedAt = null;
-    qualityFrameIntervals = [];
-    resetPerformanceSample();
-    actualFps = 0;
   };
 
   const resize = (): void => {
-    // Le grain n'a pas besoin de la pleine résolution Retina d'une interface.
-    // Sur téléphone, 1 pixel de rendu par pixel CSS réduit fortement la charge GPU.
-    const pixelRatioLimit = window.innerWidth <= 768 ? 1 : 1.5;
+    // Grain does not need the full Retina resolution of an interface. On
+    // phones, one render pixel per CSS pixel greatly reduces the GPU load.
+    const pixelRatioLimit = window.innerWidth <= MOBILE_BREAKPOINT_PX ? 1 : 1.5;
     const basePixelRatio = Math.min(window.devicePixelRatio || 1, pixelRatioLimit);
     pixelRatio = basePixelRatio * getQualityLevel().renderScale;
-    const width = isFullscreenTarget ? window.innerWidth : target.clientWidth;
-    const height = isFullscreenTarget ? window.innerHeight : target.clientHeight;
-    canvas.width = Math.max(1, Math.round(width * pixelRatio));
-    canvas.height = Math.max(1, Math.round(height * pixelRatio));
+    const cssWidth = isFullscreenTarget ? window.innerWidth : target.clientWidth;
+    const cssHeight = isFullscreenTarget ? window.innerHeight : target.clientHeight;
+    const width = Math.max(1, Math.round(cssWidth * pixelRatio));
+    const height = Math.max(1, Math.round(cssHeight * pixelRatio));
+    // Assigning a canvas size reallocates its buffer even when the value is
+    // unchanged. Local targets receive both window and ResizeObserver events.
+    if (canvas.width !== width) canvas.width = width;
+    if (canvas.height !== height) canvas.height = height;
     updateMaskTexture();
     render();
   };
@@ -1504,6 +1038,57 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
       stopLoop();
       render();
     }
+  };
+
+  // Moving the window to a screen with another pixel density does not always
+  // fire a resize event, so the current density is watched directly.
+  const handlePixelRatioChange = (): void => {
+    watchPixelRatio();
+    resize();
+  };
+
+  const watchPixelRatio = (): void => {
+    pixelRatioQuery?.removeEventListener("change", handlePixelRatioChange);
+    pixelRatioQuery = typeof window.matchMedia === "function"
+      ? window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`)
+      : null;
+    pixelRatioQuery?.addEventListener("change", handlePixelRatioChange);
+  };
+
+  // Replacing the content with textContent, innerHTML or replaceChildren()
+  // also removes the grain canvas. React does this when it updates the text
+  // of an element whose only other child is the canvas.
+  const handleContentMutation = (records: MutationRecord[]): void => {
+    if (destroyed) return;
+    if (canvas.parentNode !== target) target.appendChild(canvas);
+
+    const contentChanged = records.some((record) =>
+      record.type !== "childList"
+      || [...record.addedNodes, ...record.removedNodes].some(
+        (node) => node !== canvas,
+      ));
+    if (contentChanged && maskMode === "text") {
+      updateMaskTexture();
+      render();
+    }
+  };
+
+  // Direct children are always watched to keep the canvas attached. The text
+  // inside them is only watched while the text mask needs it.
+  const syncContentObserver = (): void => {
+    if (!contentObserver) return;
+    contentObserver.disconnect();
+    contentObserver.observe(
+      target,
+      maskMode === "text"
+        ? { childList: true, characterData: true, subtree: true }
+        : { childList: true },
+    );
+  };
+
+  // Fonts can finish loading at any time, including after creation.
+  const handleFontsLoaded = (): void => {
+    if (!destroyed && maskMode === "text") resize();
   };
 
   const handleContextLost = (event: Event): void => {
@@ -1529,7 +1114,7 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
       startLoop();
     } catch (error) {
       resources = null;
-      console.error("Pardigon: restauration du contexte WebGL2 impossible.", error);
+      console.error("Pardigon: could not restore the WebGL2 context.", error);
     }
   };
 
@@ -1539,6 +1124,7 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
   canvas.addEventListener("webglcontextlost", handleContextLost);
   canvas.addEventListener("webglcontextrestored", handleContextRestored);
   addLuminanceSourceListeners(luminanceOptions.source);
+  watchPixelRatio();
   if (!isFullscreenTarget && "ResizeObserver" in window) {
     resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(target);
@@ -1551,122 +1137,73 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     });
     intersectionObserver.observe(target);
   }
-  if (!isFullscreenTarget && "MutationObserver" in window) {
-    maskMutationObserver = new MutationObserver(() => {
-      if (destroyed || maskMode !== "text") return;
-      updateMaskTexture();
-      render();
-    });
-    maskMutationObserver.observe(target, {
-      characterData: true,
-      childList: true,
-      subtree: true,
-    });
+  if ("MutationObserver" in window) {
+    contentObserver = new MutationObserver(handleContentMutation);
+    syncContentObserver();
   }
+  document.fonts?.addEventListener("loadingdone", handleFontsLoaded);
   resize();
   startLoop();
-  void document.fonts?.ready.then(() => {
-    if (!destroyed && maskMode === "text") resize();
-  });
+  void document.fonts?.ready.then(handleFontsLoaded);
 
   return {
     update(nextOptions): void {
       if (destroyed) return;
 
-      const nextPreset = resolvePreset(nextOptions.preset);
-      const resolvedOptions = nextPreset
-        ? { ...nextPreset, ...nextOptions }
-        : nextOptions;
+      // Everything is resolved first, so an invalid option changes nothing.
+      const nextSettings = resolveSettings(
+        nextOptions,
+        resolvePreset(nextOptions.preset) ?? settings,
+      );
+      const nextMaskMode = nextOptions.mask === undefined
+        ? maskMode
+        : resolveMaskMode(nextOptions.mask);
+      const nextLuminanceOptions = nextOptions.luminance === undefined
+        ? luminanceOptions
+        : resolveLuminanceOptions(nextOptions.luminance, luminanceOptions);
+      const nextQualityMode = nextOptions.quality === undefined
+        ? null
+        : resolveQualityMode(nextOptions.quality);
+      const nextRespectReducedMotion = requireBoolean(
+        "respectReducedMotion",
+        nextOptions.respectReducedMotion ?? respectReducedMotion,
+      );
 
-      if (resolvedOptions.intensity !== undefined) {
-        settings.intensity = clamp(resolvedOptions.intensity, 0, 1);
-      }
+      const previousSettings = settings;
+      settings = nextSettings;
+      respectReducedMotion = nextRespectReducedMotion;
 
-      if (resolvedOptions.color !== undefined) {
-        settings.color = normalizeHexColor(resolvedOptions.color);
+      if (settings.color !== previousSettings.color) {
         colorComponents = hexToRgb(settings.color);
       }
 
-      if (resolvedOptions.blendMode !== undefined) {
-        settings.blendMode = resolveBlendMode(resolvedOptions.blendMode);
+      if (settings.blendMode !== previousSettings.blendMode) {
         canvas.style.mixBlendMode = settings.blendMode;
       }
 
-      if (resolvedOptions.size !== undefined) {
-        settings.size = Math.max(resolvedOptions.size, 0.1);
-      }
-
-      if (resolvedOptions.scaleX !== undefined) {
-        settings.scaleX = Math.max(resolvedOptions.scaleX, 1);
-      }
-
-      if (resolvedOptions.scaleY !== undefined) {
-        settings.scaleY = Math.max(resolvedOptions.scaleY, 1);
-      }
-
-      if (resolvedOptions.animated !== undefined) {
-        settings.animated = resolvedOptions.animated;
-      }
-
-      if (resolvedOptions.blur !== undefined) {
-        settings.blur = clamp(resolvedOptions.blur, 0, 1);
-      }
-
-      if (resolvedOptions.complexity !== undefined) {
-        settings.complexity = clamp(resolvedOptions.complexity, 0, 1);
-      }
-
-      if (resolvedOptions.character !== undefined) {
-        settings.character = clamp(resolvedOptions.character, 0, 1);
-      }
-
-      if (resolvedOptions.chromatic !== undefined) {
-        settings.chromatic = clamp(resolvedOptions.chromatic, 0, 1);
-      }
-
-      if (resolvedOptions.continuity !== undefined) {
-        settings.continuity = clamp(resolvedOptions.continuity, 0, 1);
-      }
-
-      if (resolvedOptions.flicker !== undefined) {
-        settings.flicker = clamp(resolvedOptions.flicker, 0, 1);
-      }
-
-      if (resolvedOptions.dirt !== undefined) {
-        settings.dirt = clamp(resolvedOptions.dirt, 0, 1);
-      }
-
-      if (resolvedOptions.speed !== undefined) {
-        settings.speed = Math.max(resolvedOptions.speed, 0.05);
-      }
-
-      if (resolvedOptions.fps !== undefined) {
-        settings.fps = clamp(resolvedOptions.fps, 1, 60);
+      if (settings.fps !== previousSettings.fps) {
         lastRenderTimestamp = null;
       }
 
-      if (resolvedOptions.animationMode !== undefined) {
-        settings.animationMode = resolvedOptions.animationMode;
-      }
-
-      if (resolvedOptions.respectReducedMotion !== undefined) {
-        respectReducedMotion = resolvedOptions.respectReducedMotion;
-      }
-
-      if (resolvedOptions.mask !== undefined) {
-        maskMode = resolveMaskMode(resolvedOptions.mask);
+      if (nextOptions.mask !== undefined) {
+        maskMode = nextMaskMode;
+        syncContentObserver();
         updateMaskTexture();
       }
 
-      if (resolvedOptions.luminance !== undefined) {
-        updateLuminanceOptions(resolvedOptions.luminance);
+      if (nextOptions.luminance !== undefined) {
+        setLuminanceOptions(nextLuminanceOptions);
       }
 
       let qualityChanged = false;
-      if (resolvedOptions.quality !== undefined) {
-        qualityMode = resolvedOptions.quality === "auto" ? "auto" : "fixed";
-        qualityChanged = qualityLevel !== 0;
-        qualityLevel = 0;
+      if (nextQualityMode !== null) {
+        qualityMode = nextQualityMode;
+        qualityChanged = adaptiveQuality.level !== 0;
+        // The learnt display cadence describes the device, not the mode.
+        adaptiveQuality = {
+          ...INITIAL_ADAPTIVE_QUALITY,
+          baselineIntervalMs: adaptiveQuality.baselineIntervalMs,
+        };
         resetQualitySamples();
         lastRenderTimestamp = null;
       }
@@ -1685,7 +1222,7 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
         gpuTimeMs,
         gpuTimerSupported: gpuTimerExtension !== null,
         quality: qualityMode,
-        qualityLevel,
+        qualityLevel: adaptiveQuality.level,
         renderScale: getQualityLevel().renderScale,
         effectiveFps: getEffectiveFps(),
         effectiveComplexity: getEffectiveComplexity(),
@@ -1696,16 +1233,18 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
       };
     },
 
+    // pause() and play() do not change the animated setting: a static preset
+    // stays static after play(), and update({ animated }) still applies.
     pause(): void {
       if (destroyed) return;
-      settings.animated = false;
+      paused = true;
       stopLoop();
       render();
     },
 
     play(): void {
       if (destroyed) return;
-      settings.animated = true;
+      paused = false;
       startLoop();
     },
 
@@ -1716,11 +1255,13 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
       window.removeEventListener("resize", resize);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       reducedMotionQuery?.removeEventListener("change", handleReducedMotionChange);
+      pixelRatioQuery?.removeEventListener("change", handlePixelRatioChange);
       canvas.removeEventListener("webglcontextlost", handleContextLost);
       canvas.removeEventListener("webglcontextrestored", handleContextRestored);
       resizeObserver?.disconnect();
       intersectionObserver?.disconnect();
-      maskMutationObserver?.disconnect();
+      contentObserver?.disconnect();
+      document.fonts?.removeEventListener("loadingdone", handleFontsLoaded);
       removeLuminanceSourceListeners(luminanceOptions.source);
       if (pendingGpuQuery && !gl.isContextLost()) {
         gl.deleteQuery(pendingGpuQuery);
@@ -1732,8 +1273,14 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
         gl.getExtension("WEBGL_lose_context")?.loseContext();
       }
       canvas.remove();
-      if (didSetTargetPosition && target.style.position === "relative") {
-        target.style.position = previousTargetPosition;
+      if (positionEntry) {
+        positionEntry.instances -= 1;
+        if (positionEntry.instances === 0) {
+          positionedTargets.delete(target);
+          if (target.style.position === "relative") {
+            target.style.position = positionEntry.previousPosition;
+          }
+        }
       }
     },
   };

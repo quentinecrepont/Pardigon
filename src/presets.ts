@@ -1,4 +1,4 @@
-import type { GrainPresetName, GrainSettings } from "./types";
+import type { GrainPresetName, GrainSettings } from "./types.js";
 
 const definePreset = (settings: GrainSettings): Readonly<GrainSettings> =>
   Object.freeze(settings);

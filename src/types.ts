@@ -15,7 +15,11 @@ export type GrainLuminanceSource =
   | HTMLCanvasElement;
 
 export interface GrainLuminanceOptions {
-  /** Image, video or canvas sampled by the shader. */
+  /**
+   * Image, video or canvas sampled by the shader. A canvas is read again on
+   * every grain frame. When the grain is static, call `update({})` after
+   * drawing on the canvas.
+   */
   source?: GrainLuminanceSource;
   /** Strength of the luminance response, between 0 and 1. */
   response?: number;
@@ -124,9 +128,13 @@ export interface GrainMetrics {
 }
 
 export interface GrainInstance {
+  /** Applies new options. Invalid values throw and leave the grain unchanged. */
   update(options: GrainUpdateOptions): void;
   getMetrics(): GrainMetrics;
+  /** Freezes the animation on its current frame without changing `animated`. */
   pause(): void;
+  /** Resumes an animation stopped by pause(). Static settings stay static. */
   play(): void;
+  /** Removes the canvas, observers and event listeners. */
   destroy(): void;
 }

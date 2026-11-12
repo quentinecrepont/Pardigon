@@ -1,4 +1,4 @@
-import type { GrainBlendMode } from "./types";
+import type { GrainBlendMode } from "./types.js";
 
 const GRAIN_BLEND_MODES: readonly GrainBlendMode[] = [
   "normal",
@@ -8,7 +8,7 @@ const GRAIN_BLEND_MODES: readonly GrainBlendMode[] = [
   "screen",
 ];
 
-type BlendModeSupport = (property: string, value: string) => boolean;
+export type BlendModeSupport =(property: string, value: string) => boolean;
 
 const browserSupportsBlendMode: BlendModeSupport = (property, value) =>
   typeof CSS !== "undefined"

@@ -2,14 +2,20 @@ import {
   createGrain,
   grainPresets,
   isWebGL2Supported,
+  type GrainAnimationMode,
   type GrainInstance,
   type GrainLuminanceFit,
+  type GrainLuminanceOptions,
   type GrainLuminanceRange,
+  type GrainLuminanceSource,
   type GrainMaskMode,
+  type GrainMetrics,
   type GrainBlendMode,
   type GrainOptions,
   type GrainPresetName,
   type GrainQualityMode,
+  type GrainSettings,
+  type GrainUpdateOptions,
 } from "pardigon";
 
 const preset: GrainPresetName = "8mm";
@@ -18,7 +24,11 @@ const blendMode: GrainBlendMode = "soft-light";
 const mask: GrainMaskMode = "text";
 const luminanceRange: GrainLuminanceRange = "midtones";
 const luminanceFit: GrainLuminanceFit = "cover";
-const luminanceSource = document.createElement("img");
+const luminanceSource: GrainLuminanceSource = document.createElement("img");
+const animationMode: GrainAnimationMode = "flow";
+const settings: GrainSettings = { ...grainPresets.fog, animationMode };
+const luminance: GrainLuminanceOptions = { source: luminanceSource };
+const update: GrainUpdateOptions = { ...settings, luminance };
 const options: GrainOptions = {
   target: document.body,
   preset,
@@ -61,7 +71,8 @@ if (isWebGL2Supported()) {
   grain.update({ quality: "fixed" });
   grain.update({ quality: "auto" });
   grain.update({ respectReducedMotion: false });
-  const metrics = grain.getMetrics();
+  grain.update(update);
+  const metrics: GrainMetrics = grain.getMetrics();
   metrics.gpuTimeMs;
   metrics.gpuTimerSupported;
   metrics.quality;

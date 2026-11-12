@@ -1,11 +1,16 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "declaration": false,
-    "emitDeclarationOnly": false,
     "noEmit": false,
     "outDir": ".test-dist",
     "rootDir": "src"
   },
-  "include": ["src/blendMode.ts", "src/frameScheduler.ts", "src/flicker.ts"]
+  "include": [
+    "src/adaptiveQuality.ts",
+    "src/blendMode.ts",
+    "src/frameScheduler.ts",
+    "src/flicker.ts",
+    "src/settings.ts",
+    "src/textMask.ts"
+  ]
 }

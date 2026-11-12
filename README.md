@@ -1,14 +1,12 @@
 # Pardigon
 
-#### Current version: v1.0.0
-
 Procedural cinematic grain for the web.
 
 Pardigon is a small TypeScript and WebGL2 library that adds texture and atmosphere to websites. The grain is generated live on the GPU with a GLSL shader. It does not use pre-rendered noise textures or generate pixels on the CPU. It can also react to the light and dark areas of an image or video.
 
 [Explore the live demo](https://pardigon.vercel.app)
 
-![Version](https://img.shields.io/badge/version-1.0.0-ff5a00?style=flat-square)
+![Version](https://img.shields.io/github/package-json/v/quentinecrepont/Pardigon?style=flat-square&color=ff5a00&label=version)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178c6?style=flat-square)](https://www.typescriptlang.org/)
 [![WebGL2](https://img.shields.io/badge/renderer-WebGL2-173d80?style=flat-square)](https://developer.mozilla.org/en-US/docs/Web/API/WebGL2RenderingContext)
 [![License](https://img.shields.io/badge/license-MIT-5d7b3d?style=flat-square)](LICENSE)
@@ -21,7 +19,6 @@ Pardigon is a small TypeScript and WebGL2 library that adds texture and atmosphe
 | **Runtime dependencies** | 0 |
 | **Module format** | ES modules |
 | **Browser requirement** | WebGL2 |
-| **Version** | v1.0.0 |
 
 ## Highlights
 
@@ -196,7 +193,7 @@ createGrain({
 });
 ```
 
-The text stays in the page and remains accessible. Pardigon updates the mask when the element changes size, the text changes or its web font finishes loading. The grain itself is still generated on the GPU.
+The text stays in the page and remains accessible. The mask follows the text where the browser places it, including its alignment, indent and `text-transform`. Pardigon updates the mask when the element changes size, the text changes or its web font finishes loading. The grain itself is still generated on the GPU.
 
 ### Luminance-dependent grain
 
@@ -221,6 +218,8 @@ createGrain({
 `response: 0` keeps the grain even across the image. `response: 1` gives the strongest effect. `range` chooses which tones receive more grain: `shadows`, `midtones` or `highlights`.
 
 Images and videos hosted on the same website work directly. Media hosted elsewhere must allow cross-origin access (CORS). Pardigon cannot use normal HTML content as a luminance source.
+
+A canvas source is read again for every grain frame. When the grain is static, call `grain.update({})` after drawing on the canvas.
 
 If your website can work without the grain, check for WebGL2 support before creating it:
 
@@ -313,6 +312,8 @@ grain.play();
 grain.destroy();
 ```
 
+`pause()` freezes the grain on its current frame and `play()` resumes it. They do not change `animated`, so a static preset such as `paper` stays static after `play()`. Use `update({ animated: true })` to animate it. While the grain is paused, `update()` applies new settings to the still frame.
+
 `destroy()` stops the effect and removes its canvas, observers and event listeners.
 
 ## Performance metrics
@@ -371,6 +372,8 @@ const {
 | `fps` | Temporal frame rate, from `1` to `60` | `24` |
 | `animationMode` | `evolve` or `flow` | `evolve` |
 
+Numbers outside their range are clamped to it. Other invalid values throw an error and leave the grain unchanged: unknown names, colours that are not `#RGB` or `#RRGGBB`, numbers that are `NaN` or infinite, and a `target` that is not an HTML element. `blendMode` is the only exception. It falls back to `normal`, because browser support varies.
+
 ## Performance
 
 The shader draws `1` triangle for each grain surface. Static grain does not run a continuous animation loop. Animated grain never goes above the selected frame rate. It pauses when the page is hidden or when a local target leaves the screen. Reduced-motion settings make the grain static by default.
@@ -380,6 +383,8 @@ If the browser loses its WebGL connection, Pardigon rebuilds the GPU resources w
 On high-density screens, render resolution is limited to `1x` device pixel ratio on screens of `768px` or less and `1.5x` on larger screens. The actual cost depends on the screen, the device, the grain's complexity and the number of active grain surfaces.
 
 With `quality: "auto"`, Pardigon watches frame stability while the grain runs. It lowers quality after `2` poor `1`-second samples and raises it again after `5` stable samples. This delay stops the quality from changing too often.
+
+Slow frames do not always come from Pardigon. Power-saving modes, such as Low Power Mode on iPhone, can limit the browser to `30 FPS`. Before lowering quality, Pardigon tests its lowest level for `1` second. If the frames do not get faster, it restores the previous quality and treats that frame rate as normal.
 
 The `4` quality levels reduce internal resolution first, remove the extra detail layer second and lower the frame rate last. The lowest level uses `55%` of the original render resolution and `75%` of the selected frame rate. It does not change the original settings.
 
@@ -500,7 +505,7 @@ This option adds `2` extra noise calculations only when it is enabled. Existing 
 
 ## Local development
 
-To work on Pardigon locally, use Node.js `20.19` or newer, or Node.js `22.12` or newer.
+To work on Pardigon locally, use Node.js `20.19` or a later `20.x` release, or Node.js `22.12` or newer.
 
 ```bash
 npm install
@@ -514,7 +519,3 @@ Repository: [github.com/quentinecrepont/Pardigon](https://github.com/quentinecre
 ## License
 
 The Pardigon library source code is available under the MIT License. The Pardigon name, branding and separate demo-site assets are not covered by this license.
-
-## Status
-
-Pardigon requires WebGL2, uses ES modules and has no runtime dependencies.
