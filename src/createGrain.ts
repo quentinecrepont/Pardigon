@@ -567,15 +567,7 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     ? window.matchMedia("(prefers-reduced-motion: reduce)")
     : null;
 
-  let positionEntry = positionedTargets.get(target);
-  if (positionEntry) {
-    positionEntry.instances += 1;
-  } else if (!isFullscreenTarget && getComputedStyle(target).position === "static") {
-    positionEntry = { instances: 1, previousPosition: target.style.position };
-    positionedTargets.set(target, positionEntry);
-    target.style.position = "relative";
-  }
-  target.appendChild(canvas);
+  let positionEntry: PositionedTarget | undefined;
 
   const getQualityLevel = () =>
     AUTO_QUALITY_LEVELS[adaptiveQuality.level] ?? AUTO_QUALITY_LEVELS[0];
@@ -893,8 +885,9 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     luminanceTextureReady = false;
     lastUploadedVideoTime = -1;
     // A running loop uploads the new source on its next scheduled grain frame.
-    // Rendering here as well would exceed the selected frame rate.
-    if (animationFrameId === null) render();
+    // Rendering here as well would exceed the selected frame rate. A hidden
+    // grain catches up when it is shown again.
+    if (animationFrameId === null && isShown()) render();
   };
 
   // New media may come from a different origin, so a previous CORS failure
@@ -947,10 +940,20 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     && !paused
     && !(respectReducedMotion && reducedMotionQuery?.matches === true);
 
+  const isShown = (): boolean => !document.hidden && targetVisible;
+
+  /** Every condition the animation loop needs, checked as one. */
+  const canRunLoop = (): boolean =>
+    !destroyed
+    && resources !== null
+    && !gl.isContextLost()
+    && isShown()
+    && shouldAnimate();
+
   const loop = (timestamp: number): void => {
-    if (destroyed || !shouldAnimate() || gl.isContextLost()) {
+    if (!canRunLoop()) {
       animationFrameId = null;
-      previousTimestamp = null;
+      stopLoop();
       return;
     }
 
@@ -983,15 +986,8 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
   };
 
   const startLoop = (): void => {
-    if (
-      !destroyed
-      && !document.hidden
-      && targetVisible
-      && shouldAnimate()
-      && !gl.isContextLost()
-      && animationFrameId === null
-    ) {
-      if (resetQualitySamples()) resize();
+    if (animationFrameId === null && canRunLoop()) {
+      // Quality samples were already reset when the loop stopped.
       resetPerformanceSample();
       lastRenderTimestamp = null;
       animationFrameId = requestAnimationFrame(loop);
@@ -1003,10 +999,13 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
       cancelAnimationFrame(animationFrameId);
       animationFrameId = null;
     }
-    // Quality and performance samples are reset by startLoop(), and
-    // getMetrics() reports no FPS while the loop is stopped.
+    // Performance samples are reset by startLoop(), and getMetrics() reports
+    // no FPS while the loop is stopped.
     previousTimestamp = null;
     lastRenderTimestamp = null;
+    // A probe tests one sample of the running loop. Ending it here keeps a
+    // paused or static frame from staying at the lowest quality level.
+    if (resetQualitySamples() && !destroyed) resize();
   };
 
   const resize = (): void => {
@@ -1027,9 +1026,22 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     render();
   };
 
+  const handleShown = (): void => {
+    startLoop();
+    // A static grain skipped the luminance updates made while it was hidden.
+    if (
+      animationFrameId === null
+      && isShown()
+      && luminanceOptions.enabled
+      && !luminanceTextureReady
+    ) {
+      render();
+    }
+  };
+
   const handleVisibilityChange = (): void => {
     if (document.hidden) stopLoop();
-    else startLoop();
+    else handleShown();
   };
 
   const handleReducedMotionChange = (): void => {
@@ -1118,32 +1130,85 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
     }
   };
 
-  window.addEventListener("resize", resize);
-  document.addEventListener("visibilitychange", handleVisibilityChange);
-  reducedMotionQuery?.addEventListener("change", handleReducedMotionChange);
-  canvas.addEventListener("webglcontextlost", handleContextLost);
-  canvas.addEventListener("webglcontextrestored", handleContextRestored);
-  addLuminanceSourceListeners(luminanceOptions.source);
-  watchPixelRatio();
-  if (!isFullscreenTarget && "ResizeObserver" in window) {
-    resizeObserver = new ResizeObserver(resize);
-    resizeObserver.observe(target);
+  const destroy = (): void => {
+    if (destroyed) return;
+    destroyed = true;
+    stopLoop();
+    window.removeEventListener("resize", resize);
+    document.removeEventListener("visibilitychange", handleVisibilityChange);
+    reducedMotionQuery?.removeEventListener("change", handleReducedMotionChange);
+    pixelRatioQuery?.removeEventListener("change", handlePixelRatioChange);
+    canvas.removeEventListener("webglcontextlost", handleContextLost);
+    canvas.removeEventListener("webglcontextrestored", handleContextRestored);
+    resizeObserver?.disconnect();
+    intersectionObserver?.disconnect();
+    contentObserver?.disconnect();
+    document.fonts?.removeEventListener("loadingdone", handleFontsLoaded);
+    removeLuminanceSourceListeners(luminanceOptions.source);
+    if (pendingGpuQuery && !gl.isContextLost()) {
+      gl.deleteQuery(pendingGpuQuery);
+    }
+    pendingGpuQuery = null;
+    deleteRendererResources(gl, resources);
+    resources = null;
+    if (!gl.isContextLost()) {
+      gl.getExtension("WEBGL_lose_context")?.loseContext();
+    }
+    canvas.remove();
+    if (positionEntry) {
+      positionEntry.instances -= 1;
+      if (positionEntry.instances === 0) {
+        positionedTargets.delete(target);
+        if (target.style.position === "relative") {
+          target.style.position = positionEntry.previousPosition;
+        }
+      }
+    }
+  };
+
+  try {
+    positionEntry = positionedTargets.get(target);
+    if (positionEntry) {
+      positionEntry.instances += 1;
+    } else if (!isFullscreenTarget && getComputedStyle(target).position === "static") {
+      positionEntry = { instances: 1, previousPosition: target.style.position };
+      positionedTargets.set(target, positionEntry);
+      target.style.position = "relative";
+    }
+    target.appendChild(canvas);
+
+    window.addEventListener("resize", resize);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    reducedMotionQuery?.addEventListener("change", handleReducedMotionChange);
+    canvas.addEventListener("webglcontextlost", handleContextLost);
+    canvas.addEventListener("webglcontextrestored", handleContextRestored);
+    addLuminanceSourceListeners(luminanceOptions.source);
+    watchPixelRatio();
+    if (!isFullscreenTarget && "ResizeObserver" in window) {
+      resizeObserver = new ResizeObserver(resize);
+      resizeObserver.observe(target);
+    }
+    if (!isFullscreenTarget && "IntersectionObserver" in window) {
+      intersectionObserver = new IntersectionObserver(([entry]) => {
+        targetVisible = entry?.isIntersecting ?? true;
+        if (targetVisible) handleShown();
+        else stopLoop();
+      });
+      intersectionObserver.observe(target);
+    }
+    if ("MutationObserver" in window) {
+      contentObserver = new MutationObserver(handleContentMutation);
+      syncContentObserver();
+    }
+    document.fonts?.addEventListener("loadingdone", handleFontsLoaded);
+    resize();
+    startLoop();
+  } catch (error) {
+    // A failed setup must not leave a canvas, listeners, a repositioned
+    // target or a live WebGL context behind.
+    destroy();
+    throw error;
   }
-  if (!isFullscreenTarget && "IntersectionObserver" in window) {
-    intersectionObserver = new IntersectionObserver(([entry]) => {
-      targetVisible = entry?.isIntersecting ?? true;
-      if (targetVisible) startLoop();
-      else stopLoop();
-    });
-    intersectionObserver.observe(target);
-  }
-  if ("MutationObserver" in window) {
-    contentObserver = new MutationObserver(handleContentMutation);
-    syncContentObserver();
-  }
-  document.fonts?.addEventListener("loadingdone", handleFontsLoaded);
-  resize();
-  startLoop();
   void document.fonts?.ready.then(handleFontsLoaded);
 
   return {
@@ -1248,40 +1313,6 @@ export function createGrain(options: GrainOptions = {}): GrainInstance {
       startLoop();
     },
 
-    destroy(): void {
-      if (destroyed) return;
-      destroyed = true;
-      stopLoop();
-      window.removeEventListener("resize", resize);
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-      reducedMotionQuery?.removeEventListener("change", handleReducedMotionChange);
-      pixelRatioQuery?.removeEventListener("change", handlePixelRatioChange);
-      canvas.removeEventListener("webglcontextlost", handleContextLost);
-      canvas.removeEventListener("webglcontextrestored", handleContextRestored);
-      resizeObserver?.disconnect();
-      intersectionObserver?.disconnect();
-      contentObserver?.disconnect();
-      document.fonts?.removeEventListener("loadingdone", handleFontsLoaded);
-      removeLuminanceSourceListeners(luminanceOptions.source);
-      if (pendingGpuQuery && !gl.isContextLost()) {
-        gl.deleteQuery(pendingGpuQuery);
-      }
-      pendingGpuQuery = null;
-      deleteRendererResources(gl, resources);
-      resources = null;
-      if (!gl.isContextLost()) {
-        gl.getExtension("WEBGL_lose_context")?.loseContext();
-      }
-      canvas.remove();
-      if (positionEntry) {
-        positionEntry.instances -= 1;
-        if (positionEntry.instances === 0) {
-          positionedTargets.delete(target);
-          if (target.style.position === "relative") {
-            target.style.position = positionEntry.previousPosition;
-          }
-        }
-      }
-    },
+    destroy,
   };
 }
